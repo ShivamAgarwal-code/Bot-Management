@@ -6,14 +6,17 @@ import { BetHistory } from './entities/bet-history.entity';
 import { WalletService } from './services/wallet.service';
 import { BotConfigService } from './services/bot-config.service';
 import { BotEngineService } from './services/bot-engine.service';
+import { Web3Service } from './services/web3.service';
 import { BotManagementController } from './controllers/bot-management.controller';
+import { AdminDashboardModule } from 'src/admin-dashboard/admin-dashboard.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([BotWallet, BotConfig, BetHistory])
+    TypeOrmModule.forFeature([BotWallet, BotConfig, BetHistory]),
+    AdminDashboardModule
   ],
   controllers: [BotManagementController],
-  providers: [WalletService, BotConfigService, BotEngineService],
-  exports: [WalletService, BotConfigService, BotEngineService],
+  providers: [WalletService, BotConfigService, BotEngineService, Web3Service],
+  exports: [WalletService, BotConfigService, BotEngineService, Web3Service],
 })
 export class BotManagementModule {}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { FaPause, FaStop } from "react-icons/fa6";
 import { message, Avatar } from "antd";
 import { RiRestartLine } from "react-icons/ri";
@@ -6,7 +6,7 @@ import { HiMiniPlayPause } from "react-icons/hi2";
 import axios from "axios";
 import avatarIcon from "../../assets/Avatar.png";
 import NumberFlow from '@number-flow/react'
-import solIcon from "../../../public/sol-icon.png";
+import solIcon from "../../assets/sol-icon.png"; ;
 import { DotLoader } from "react-spinners";
 import { ArrowDown, ArrowUp } from "lucide-react";
 
@@ -21,23 +21,16 @@ interface BotWallet {
 
 interface BotConfig {
   id: number;
-  walletCount: number;
   minBet: number;
   maxBet: number;
   epochFrom: number;
   epochTo: number;
   betTimeFrom: number;
   betTimeTo: number;
-  downBalanceFrom: number;
-  downBalanceTo: number;
-  upBalanceFrom: number;
-  upBalanceTo: number;
+  upDownBalanceFrom: number;
+  upDownBalanceTo: number;
   walletCountFrom: number;
   walletCountTo: number;
-  minBetFrom: number;
-  minBetTo: number;
-  maxBetFrom: number;
-  maxBetTo: number;
   status: "stopped" | "running" | "paused";
   isActive: boolean;
   createdAt: string;
@@ -56,34 +49,21 @@ interface BetHistory {
   createdAt: string;
 }
 
-interface SolPriceData {
-  price: number;
-  change24h: number;
-  volume24h: number;
-}
-
 const API_BASE_URL = "https://sol-prediction-backend-6e3r.onrender.com/bot-management";
 
 export default function BotManagement() {
   const [config, setConfig] = useState<BotConfig>({
     id: 0,
-    walletCount: 0,
     minBet: 0,
     maxBet: 0,
     epochFrom: 0,
     epochTo: 0,
     betTimeFrom: 0,
     betTimeTo: 180,
-    downBalanceFrom: 1.0,
-    downBalanceTo: 2.0,
-    upBalanceFrom: 1.0,
-    upBalanceTo: 2.0,
     walletCountFrom: 1,
     walletCountTo: 10,
-    minBetFrom: 0.01,
-    minBetTo: 0.1,
-    maxBetFrom: 0.1,
-    maxBetTo: 1.0,
+    upDownBalanceFrom: 0,
+    upDownBalanceTo: 0,
     status: "stopped",
     isActive: true,
     createdAt: "",
@@ -101,183 +81,22 @@ export default function BotManagement() {
   const [loading, setLoading] = useState(false);
   const [timeLeft, setTimeLeft] = useState(120);
 
-  // New state for SOL price and betting
-  const [solPrice, setSolPrice] = useState<SolPriceData>({
-    price: 0,
-    change24h: 0,
-    volume24h: 0
-  });
-  const [currentEpoch, setCurrentEpoch] = useState(3619);
-  const [activeBets, setActiveBets] = useState<BetHistory[]>([]);
-  const [lockedPrice, setLockedPrice] = useState<number>(0);
-
-  // Refs for intervals
-  const priceIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const bettingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const epochIntervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Fetch real-time SOL price
-  const fetchSolPrice = async () => {
-    try {
-      const response = await axios.get(
-        'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true'
-      );
-
-      if (response.data && response.data.solana) {
-        setSolPrice({
-          price: response.data.solana.usd,
-          change24h: response.data.solana.usd_24h_change || 0,
-          volume24h: response.data.solana.usd_24h_vol || 0
-        });
-      }
-    } catch (error) {
-      console.error("Failed to fetch SOL price:", error);
-      // Fallback to random price simulation if API fails
-      setSolPrice(prev => ({
-        ...prev,
-        price: prev.price > 0 ? prev.price + (Math.random() - 0.5) * 2 : 250 + Math.random() * 50
-      }));
-    }
-  };
-
-  // Generate random bet for a wallet
-  const generateRandomBet = (wallet: BotWallet): Omit<BetHistory, 'id' | 'createdAt'> => {
-    const direction = Math.random() > 0.5 ? 'up' : 'down';
-    const amount = Number((Math.random() * (config.maxBetTo - config.minBetFrom) + config.minBetFrom).toFixed(4));
-
-    return {
-      walletAddress: wallet.address,
-      epoch: currentEpoch,
-      direction,
-      amount,
-      status: 'pending',
-      betTime: Date.now(),
-    };
-  };
-
-  // Execute betting logic
-  const executeBetting = async () => {
-    if (config.status !== 'running' || wallets.length === 0) return;
-
-    // Check if current epoch is within working range
-    if (currentEpoch < config.epochFrom || currentEpoch > config.epochTo) {
-      console.log(`Current epoch ${currentEpoch} is outside working range ${config.epochFrom}-${config.epochTo}`);
-      return;
-    }
-
-    try {
-      // Select random number of wallets to bet
-      const walletCount = Math.floor(
-        Math.random() * (config.walletCountTo - config.walletCountFrom + 1) + config.walletCountFrom
-      );
-
-      const activeWallets = wallets
-        .filter(w => w.balance > config.minBetFrom)
-        .sort(() => Math.random() - 0.5)
-        .slice(0, Math.min(walletCount, wallets.length));
-
-      if (activeWallets.length === 0) {
-        console.log("No wallets with sufficient balance for betting");
-        return;
-      }
-
-      // Generate bets for selected wallets
-      const newBets: BetHistory[] = activeWallets.map((wallet, index) => ({
-        id: Date.now() + index,
-        ...generateRandomBet(wallet),
-        createdAt: new Date().toISOString()
-      }));
-
-      // Add random delay between betTimeFrom and betTimeTo
-      const betDelay = Math.floor(
-        Math.random() * (config.betTimeTo - config.betTimeFrom + 1) + config.betTimeFrom
-      ) * 1000;
-
-      setTimeout(() => {
-        setActiveBets(prev => [...newBets, ...prev].slice(0, 50)); // Keep last 50 bets
-        setBetHistory(prev => [...newBets, ...prev].slice(0, 100)); // Keep last 100 bets
-
-        console.log(`Placed ${newBets.length} bets for epoch ${currentEpoch}`);
-
-        // Simulate bet outcomes after some time
-        setTimeout(() => {
-          setActiveBets(prev =>
-            prev.map(bet => {
-              if (newBets.some(nb => nb.id === bet.id)) {
-                const outcome = Math.random() > 0.5 ? 'won' : 'lost';
-                return { ...bet, status: outcome };
-              }
-              return bet;
-            })
-          );
-        }, 30000); // Resolve bets after 30 seconds
-
-      }, betDelay);
-
-    } catch (error) {
-      console.error("Failed to execute betting:", error);
-    }
-  };
-
   // Timer effect
   useEffect(() => {
     const interval = setInterval(() => {
       setTimeLeft(prev => {
-        if (prev <= 1) {
-          // New epoch starts
-          setCurrentEpoch(prevEpoch => prevEpoch + 1);
-          setLockedPrice(solPrice.price);
-          return 120;
-        }
+        if (prev <= 1) return 120;
         return prev - 1;
       });
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [solPrice.price]);
-
-  // Price fetching effect
-  useEffect(() => {
-    // Initial fetch
-    fetchSolPrice();
-
-    // Set up interval for price updates
-    priceIntervalRef.current = setInterval(fetchSolPrice, 3000); // Update every 3 seconds
-
-    return () => {
-      if (priceIntervalRef.current) {
-        clearInterval(priceIntervalRef.current);
-      }
-    };
   }, []);
-
-  // Betting execution effect
-  useEffect(() => {
-    if (config.status === 'running') {
-      // Execute betting logic every 10-30 seconds randomly
-      const executeBettingWithRandomDelay = () => {
-        const delay = Math.random() * 20000 + 10000; // 10-30 seconds
-        bettingIntervalRef.current = setTimeout(() => {
-          executeBetting();
-          executeBettingWithRandomDelay(); // Schedule next execution
-        }, delay);
-      };
-
-      executeBettingWithRandomDelay();
-    }
-
-    return () => {
-      if (bettingIntervalRef.current) {
-        clearTimeout(bettingIntervalRef.current);
-      }
-    };
-  }, [config.status, wallets, currentEpoch, config]);
 
   // Load initial data
   useEffect(() => {
     loadConfig();
     loadWallets();
-    loadActiveBets();
   }, []);
 
   const loadConfig = async () => {
@@ -302,22 +121,11 @@ export default function BotManagement() {
             balance: Number(w.balance) || 0,
           }))
         );
+
       }
     } catch (error) {
       console.error("Failed to load wallets:", error);
       message.error("Failed to load wallets");
-    }
-  };
-
-  const loadActiveBets = async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/bets/active`);
-      if (response.data.success) {
-        setActiveBets(response.data.data || []);
-      }
-    } catch (error) {
-      console.error("Failed to load active bets:", error);
-      // Don't show error message for this as it's not critical
     }
   };
 
@@ -361,13 +169,6 @@ export default function BotManagement() {
       if (response.data.success) {
         message.success(`Bot status updated to ${newStatus}`);
         setConfig(prev => ({ ...prev, status: newStatus }));
-
-        if (newStatus === 'running') {
-          message.success("Bot is now active and will start betting according to configuration!");
-        } else if (newStatus === 'stopped') {
-          // Clear active bets when stopped
-          setActiveBets([]);
-        }
       }
     } catch (error) {
       console.error("Failed to update status:", error);
@@ -635,6 +436,7 @@ export default function BotManagement() {
                           <span className={`font-semibold ${Number(wallet.balance) > 0 ? 'text-green-400' : 'text-gray-400'}`}>
                             {Number(wallet.balance || 0).toFixed(4)} SOL
                           </span>
+
                         </td>
                       </tr>
                     )) : (
@@ -671,14 +473,14 @@ export default function BotManagement() {
           <div className="flex flex-col space-y-5 p-[10px] rounded-2xl border border-white/30 backdrop-blur-[10px] bg-[#ffffff1a] w-full max-w-[500px] items-center gap-4">
             {/* Header with Triangle Icon and Live Round Text */}
             <div className="flex-col items-center justify-between space-y-3 w-[60%]">
-              <div className="flex flex-row justify-between items-center w-full">
-                <div className="flex items-center gap-2">
+              <div className="flex flex-row">
+                <div className="flex items-center gap-2 w-full">
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
                     <path fill="white" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 4v16m14-8L6 20m14-8L6 4" />
                   </svg>
                   <span className="text-white text-lg font-semibold">Live Round</span>
                 </div>
-                <span className="text-white text-base font-semibold">#{currentEpoch}</span>
+                <span className="text-white text-base font-semibold justify-end">#3619</span>
               </div>
 
               {/* Dynamic Time Progress Bar */}
@@ -697,13 +499,6 @@ export default function BotManagement() {
                 ))}
               </div>
 
-              {/* Timer Display */}
-              <div className="text-center">
-                <span className="text-white text-sm font-medium">
-                  Time Left: {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
-                </span>
-              </div>
-
               {/* UP Card */}
               <button
                 className="w-full rounded-xl text-white font-semibold text-lg flex flex-col items-center py-4"
@@ -719,34 +514,25 @@ export default function BotManagement() {
               <div className="glass-card w-full p-4 rounded-xl border border-white/30 space-y-3 text-white text-sm">
                 <div className="flex justify-between items-center">
                   <span className="opacity-70">Live Price</span>
-                  <div className="flex flex-col items-end">
-                    <NumberFlow
-                      value={solPrice.price}
-                      format={{
-                        style: "currency",
-                        currency: "USD",
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 4,
-                      }}
-                      className={`font-bold text-base ${solPrice.change24h >= 0 ? 'text-green-400' : 'text-red-400'}`}
-                      transformTiming={{
-                        duration: 500,
-                        easing: "ease-out",
-                      }}
-                    />
-                    {solPrice.change24h !== 0 && (
-                      <span className={`text-xs ${solPrice.change24h >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {solPrice.change24h >= 0 ? '+' : ''}{solPrice.change24h.toFixed(2)}%
-                      </span>
-                    )}
-                  </div>
+                  <NumberFlow
+                    value={Math.random() * 100 + 20}
+                    format={{
+                      style: "currency",
+                      currency: "USD",
+                      minimumFractionDigits: 4,
+                      maximumFractionDigits: 4,
+                    }}
+                    className="font-bold text-base text-green-400"
+                    transformTiming={{
+                      duration: 800,
+                      easing: "ease-out",
+                    }}
+                  />
                 </div>
 
                 <div className="flex justify-between items-center">
                   <span className="font-semibold">Locked Price</span>
-                  <span className="font-semibold">
-                    ${lockedPrice > 0 ? lockedPrice.toFixed(2) : "N/A"}
-                  </span>
+                  <span className="font-semibold">$250</span>
                 </div>
 
                 <div className="flex justify-between items-center">
@@ -769,18 +555,15 @@ export default function BotManagement() {
           </div>
         </div>
 
-        {/* Bot Configuration and Active Bets */}
         <div className="flex flex-col lg:flex-row gap-6 p-6 rounded-2xl border border-white/30 backdrop-blur-[10px] bg-[#ffffff1a]">
           {/* LEFT PANEL - Bot Configuration */}
           <div className="flex-1 flex flex-col gap-8 min-w-[300px]">
             <div className="space-y-6">
               {[
                 { label: "Bet Time", fromKey: "betTimeFrom", toKey: "betTimeTo", unit: "seconds" },
-                { label: "Down Balance", fromKey: "downBalanceFrom", toKey: "downBalanceTo", unit: "ratio" },
-                { label: "Up Balance", fromKey: "upBalanceFrom", toKey: "upBalanceTo", unit: "ratio" },
+                { label: "UpDown Balance", fromKey: "updownBalanceFrom", toKey: "updownBalanceTo", unit: "ratio" },
                 { label: "Wallet Count", fromKey: "walletCountFrom", toKey: "walletCountTo", unit: "count" },
-                { label: "Min Bet Amount", fromKey: "minBetFrom", toKey: "minBetTo", unit: "SOL" },
-                { label: "Max Bet Amount", fromKey: "maxBetFrom", toKey: "maxBetTo", unit: "SOL" },
+                { label: "Bet Amount", fromKey: "minBetAmount", toKey: "maxBetAmount", unit: "SOL" },
                 { label: "Working Epoch", fromKey: "epochFrom", toKey: "epochTo", unit: "epoch" },
               ].map(({ label, fromKey, toKey, unit }) => (
                 <div key={label} className="flex flex-col gap-2">
@@ -913,7 +696,7 @@ export default function BotManagement() {
               <div className="overflow-y-auto flex-1">
                 <table className="w-full text-white text-sm table-auto border-separate border-spacing-y-2">
                   <tbody>
-                    {activeBets.length > 0 ? activeBets.map((bet, i) => (
+                    {betHistory.length > 0 ? betHistory.map((bet, i) => (
                       <tr key={bet.id || i} className="bg-[#ffffff0c] rounded-md">
                         <td className="px-2 py-2 text-center font-mono text-xs">
                           {`${bet.walletAddress.slice(0, 6)}...${bet.walletAddress.slice(-4)}`}

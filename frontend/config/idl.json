@@ -353,6 +353,10 @@
         {
           "name": "bufferSeconds",
           "type": "u64"
+        },
+        {
+          "name": "executor",
+          "type": "publicKey"
         }
       ]
     },

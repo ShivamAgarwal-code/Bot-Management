@@ -10,7 +10,8 @@ import {
 import * as anchor from '@project-serum/anchor';
 import { ConfigService } from '@nestjs/config';
 import { BLOCKCHAIN_CONFIG } from '../config/blockchain.config';
-import idl from '../idl/idl.json';
+import * as idl from '../../types/sol_predictor.json';
+import { AnchorProvider } from '@project-serum/anchor';
 
 export interface BetResult {
   success: boolean;
@@ -19,12 +20,18 @@ export interface BetResult {
 }
 
 export interface RoundInfo {
-  roundId: number;
-  status: 'open' | 'closed' | 'calculating';
+  number: number;
   startTime: number;
-  endTime: number;
-  upPool: number;
-  downPool: number;
+  lockTime: number;
+  closeTime: number;
+  lockPrice: number;
+  endPrice: number;
+  isActive: boolean;
+  totalBullAmount: number;
+  totalBearAmount: number;
+  totalAmount: number;
+  rewardBaseCalAmount: number;
+  rewardAmount: number;
 }
 
 @Injectable()
@@ -38,29 +45,6 @@ export class Web3Service {
     this.programId = new PublicKey(BLOCKCHAIN_CONFIG.PROGRAM_ID);
   }
 
-  async getCurrentRound(): Promise<RoundInfo | null> {
-    try {
-      // Call your backend API to get current round info
-      const response = await fetch(`${BLOCKCHAIN_CONFIG.API_URL}/api/current-round`);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      return {
-        roundId: data.currentRound,
-        status: data.status,
-        startTime: data.startTime,
-        endTime: data.endTime,
-        upPool: data.upPool || 0,
-        downPool: data.downPool || 0,
-      };
-    } catch (error) {
-      this.logger.error('Failed to get current round:', error);
-      return null;
-    }
-  }
-
   async placeBet(
     walletKeypair: Keypair,
     roundId: number,
@@ -70,23 +54,11 @@ export class Web3Service {
     try {
       this.logger.log(`Placing bet: Round ${roundId}, Direction: ${direction ? 'UP' : 'DOWN'}, Amount: ${amount} SOL`);
 
-      // Create a mock wallet adapter for the transaction signing
-      const mockWallet = {
-        publicKey: walletKeypair.publicKey,
-        signTransaction: async (transaction: Transaction) => {
-          transaction.partialSign(walletKeypair);
-          return transaction;
-        },
-      };
-
       // Use the contract utils function
       const signature = await this.placeBetOnChain(
         this.connection,
         this.programId,
-        walletKeypair.publicKey, // contractAddress - adjust as needed
-        walletKeypair.publicKey,
-        mockWallet.signTransaction,
-        null, // sendTransaction not used
+        walletKeypair,
         roundId,
         direction,
         amount
@@ -111,10 +83,7 @@ export class Web3Service {
   private async placeBetOnChain(
     connection: Connection,
     programId: PublicKey,
-    contractAddress: PublicKey,
-    userPubkey: PublicKey,
-    signTransaction: (transaction: Transaction) => Promise<Transaction>,
-    sendTransaction: any,
+    walletKeypair: Keypair,
     roundId: number,
     direction: boolean,
     amount: number
@@ -150,16 +119,10 @@ export class Web3Service {
           programId
         )[0];
 
-      const provider = new anchor.AnchorProvider(
-        connection,
-        { publicKey: userPubkey, signTransaction } as any,
-        { commitment: "confirmed" }
-      );
-
+      const provider = new AnchorProvider(connection, new anchor.Wallet(walletKeypair), {});
       const program = new anchor.Program(idl as any, programId, provider);
-
       const roundPda = getRoundPda(roundId);
-      const userBetPda = getUserBetPda(userPubkey, roundId);
+      const userBetPda = getUserBetPda(walletKeypair.publicKey, roundId);
 
       const tx = await program.methods
         .placeBet(
@@ -171,35 +134,14 @@ export class Web3Service {
           config: configPda,
           round: roundPda,
           userBet: userBetPda,
-          user: userPubkey,
+          user: walletKeypair.publicKey,
           treasury: treasuryPda,
           systemProgram: SystemProgram.programId,
         })
-        .transaction();
+        .signers([walletKeypair])
+        .rpc();
 
-      // Get fresh blockhash
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = userPubkey;
-
-      const signedTx = await signTransaction(tx);
-      
-      const signature = await connection.sendRawTransaction(
-        signedTx.serialize(),
-        {
-          skipPreflight: false,
-          preflightCommitment: "processed",
-        }
-      );
-
-      // Confirm transaction
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight
-      }, "confirmed");
-
-      return signature;
+      return tx;
 
     } catch (error) {
       this.logger.error("Error in placeBetOnChain:", error);

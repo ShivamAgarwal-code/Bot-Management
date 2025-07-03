@@ -9,9 +9,11 @@ import { WalletService } from './wallet.service';
 import { BotConfigService } from './bot-config.service';
 import { Web3Service, RoundInfo } from './web3.service';
 import { BLOCKCHAIN_CONFIG } from '../config/blockchain.config';
-import { Keypair } from '@solana/web3.js';
+import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
+import { AdminDashboardService } from 'src/admin-dashboard/admin-dashboard.service';
+import { Interval } from '@nestjs/schedule';
 
 @Injectable()
 export class BotEngineService {
@@ -27,6 +29,7 @@ export class BotEngineService {
     private configService: BotConfigService,
     private web3Service: Web3Service,
     private config: ConfigService,
+    private adminDashboardService: AdminDashboardService,
     @InjectRepository(BetHistory)
     private betHistoryRepository: Repository<BetHistory>,
     @InjectRepository(BotWallet)
@@ -72,31 +75,26 @@ export class BotEngineService {
     this.logger.log('🛑 Bot engine stopped');
   }
 
+  @Interval(5000)
   private async startRoundMonitoring(): Promise<void> {
     this.logger.log('🔍 Starting round monitoring...');
     
-    // Check for new rounds every 5 seconds
-    this.roundCheckInterval = setInterval(async () => {
-      if (!this.isRunning) return;
-
-      try {
-        const currentRound = await this.web3Service.getCurrentRound();
+    try {
+      const currentRound = await this.adminDashboardService.getNextRoundInfo();
+      if (currentRound && currentRound.number !== this.currentRoundId) {
+        this.logger.log(`🎯 New round detected: ${currentRound.number}`);
+        this.logger.log(`📈 Round status: ${currentRound.status}`);
+        this.logger.log(`💰 Pools - UP: ${currentRound.totalBullAmount} SOL, DOWN: ${currentRound.totalBearAmount} SOL`);
         
-        if (currentRound && currentRound.roundId !== this.currentRoundId) {
-          this.logger.log(`🎯 New round detected: ${currentRound.roundId}`);
-          this.logger.log(`📈 Round status: ${currentRound.status}`);
-          this.logger.log(`💰 Pools - UP: ${currentRound.upPool} SOL, DOWN: ${currentRound.downPool} SOL`);
-          
-          this.currentRoundId = currentRound.roundId;
-          this.roundStartTime = currentRound.startTime;
-          
-          // Schedule betting for this round
-          await this.scheduleRoundBetting(currentRound);
-        }
-      } catch (error) {
-        this.logger.error('❌ Error in round monitoring:', error.message);
+        this.currentRoundId = currentRound.number;
+        this.roundStartTime = currentRound.startTime;
+        
+        // Schedule betting for this round
+        await this.scheduleRoundBetting(currentRound);
       }
-    }, 5000); // Check every 5 seconds
+    } catch (error) {
+      this.logger.error('❌ Error in round monitoring:', error.message);
+    }
   }
 
   private async scheduleRoundBetting(roundInfo: RoundInfo): Promise<void> {
@@ -110,8 +108,8 @@ export class BotEngineService {
 
       // Check if round is within configured epoch range
       if (botConfig.epochFrom && botConfig.epochTo) {
-        if (roundInfo.roundId < botConfig.epochFrom || roundInfo.roundId > botConfig.epochTo) {
-          this.logger.log(`⏭️ Round ${roundInfo.roundId} is outside epoch range [${botConfig.epochFrom}-${botConfig.epochTo}], skipping`);
+        if (roundInfo.number < botConfig.epochFrom || roundInfo.number > botConfig.epochTo) {
+          this.logger.log(`⏭️ Round ${roundInfo.number} is outside epoch range [${botConfig.epochFrom}-${botConfig.epochTo}], skipping`);
           return;
         }
       }
@@ -119,10 +117,10 @@ export class BotEngineService {
       // Calculate when to start betting (random time within configured range)
       const betStartDelay = this.getRandomInRange(botConfig.betTimeFrom, botConfig.betTimeTo) * 1000;
       
-      this.logger.log(`⏰ Scheduling bets for round ${roundInfo.roundId} in ${betStartDelay/1000} seconds`);
+      this.logger.log(`⏰ Scheduling bets for round ${roundInfo.number} in ${betStartDelay/1000} seconds`);
       
       setTimeout(async () => {
-        if (this.isRunning && this.currentRoundId === roundInfo.roundId) {
+        if (botConfig.status === 'running' && this.currentRoundId === roundInfo.number) {
           await this.executeRoundStrategy(roundInfo);
         }
       }, betStartDelay);
@@ -134,14 +132,14 @@ export class BotEngineService {
 
   private async executeRoundStrategy(roundInfo: RoundInfo): Promise<void> {
     try {
-      this.logger.log(`🎲 Executing betting strategy for round ${roundInfo.roundId}`);
+      this.logger.log(`🎲 Executing betting strategy for round ${roundInfo.number}`);
       
       const botConfig = await this.configService.getConfig();
       
       // Check if round is still open
-      const currentRound = await this.web3Service.getCurrentRound();
-      if (!currentRound || currentRound.roundId !== roundInfo.roundId || currentRound.status !== 'open') {
-        this.logger.log(`🔒 Round ${roundInfo.roundId} is no longer open, skipping bets`);
+      const currentRound = await this.adminDashboardService.getNextRoundInfo();
+      if (!currentRound || currentRound.number !== roundInfo.number) {
+        this.logger.log(`🔒 Round ${roundInfo.number} is no longer open, skipping bets`);
         return;
       }
 
@@ -159,7 +157,7 @@ export class BotEngineService {
       );
       const selectedWallets = this.selectRandomWallets(allWallets, walletCount);
       
-      this.logger.log(`👥 Selected ${selectedWallets.length} wallets for round ${roundInfo.roundId}`);
+      this.logger.log(`👥 Selected ${selectedWallets.length} wallets for round ${roundInfo.number}`);
 
       // Calculate betting strategy based on current pool ratios
       const strategy = this.calculateBettingStrategy(currentRound, botConfig);
@@ -174,7 +172,7 @@ export class BotEngineService {
   }
 
   private async getActiveWalletsWithBalance(botConfig: BotConfig): Promise<BotWallet[]> {
-    const minBetAmount = Math.min(botConfig.minBetFrom, botConfig.minBetTo);
+    const minBetAmount = Math.min(botConfig.minBet, botConfig.maxBet);
     const minRequiredBalance = minBetAmount + 0.002; // Add buffer for transaction fees
     
     return await this.walletRepository.find({
@@ -195,16 +193,16 @@ export class BotEngineService {
       
       // Add random delay between bets (1-5 seconds)
       if (i > 0) {
-        const delay = Math.random() * 4000 + 1000; // 1-5 seconds
+        const delay = Math.random() * 200; // 1-5 seconds
         await this.sleep(delay);
       }
 
       // Check if bot is still running and round is still valid
-      if (!this.isRunning) break;
-      
-      const currentRound = await this.web3Service.getCurrentRound();
-      if (!currentRound || currentRound.roundId !== roundInfo.roundId || currentRound.status !== 'open') {
-        this.logger.log(`🔒 Round ${roundInfo.roundId} closed during betting, stopping remaining bets`);
+      if (botConfig.status !== 'running') break;
+        
+      const currentRound = await this.adminDashboardService.getNextRoundInfo();
+      if (!currentRound || currentRound.number !== roundInfo.number) {
+        this.logger.log(`🔒 Round ${roundInfo.number} closed during betting, stopping remaining bets`);
         break;
       }
 
@@ -227,9 +225,7 @@ export class BotEngineService {
       const direction = this.decideBetDirection(strategy);
       
       // Calculate bet amount
-      const minBet = this.getRandomInRange(botConfig.minBetFrom, botConfig.minBetTo);
-      const maxBet = this.getRandomInRange(botConfig.maxBetFrom, botConfig.maxBetTo);
-      const betAmount = Number(this.getRandomInRange(minBet, maxBet).toFixed(6));
+      const betAmount = this.getRandomInRange(botConfig.minBet, botConfig.maxBet);
 
       // Validate bet amount against wallet balance
       if (wallet.balance < betAmount + 0.002) {
@@ -240,12 +236,12 @@ export class BotEngineService {
       this.logger.log(`💰 Placing ${direction ? 'UP' : 'DOWN'} bet of ${betAmount} SOL for wallet ${wallet.address.slice(0, 8)}...`);
 
       // Get wallet keypair
-      const walletKeypair = this.getWalletKeypair(wallet);
+      const walletKeypair = await this.walletService.getWalletKeypair(wallet);
 
       // Record bet attempt in history
       const betHistory = new BetHistory();
       betHistory.walletAddress = wallet.address;
-      betHistory.epoch = roundInfo.roundId;
+      betHistory.epoch = roundInfo.number;
       betHistory.direction = direction ? 'up' : 'down';
       betHistory.amount = betAmount;
       betHistory.betTime = Math.floor((Date.now() - roundInfo.startTime) / 1000);
@@ -256,7 +252,7 @@ export class BotEngineService {
       // Place bet on blockchain
       const betResult = await this.web3Service.placeBet(
         walletKeypair,
-        roundInfo.roundId,
+        roundInfo.number,
         direction,
         betAmount
       );
@@ -281,52 +277,23 @@ export class BotEngineService {
     }
   }
 
-  private getWalletKeypair(wallet: BotWallet): Keypair {
-    try {
-      const decryptedPrivateKey = this.decryptPrivateKey(wallet.privateKey);
-      const privateKeyArray = JSON.parse(decryptedPrivateKey);
-      return Keypair.fromSecretKey(new Uint8Array(privateKeyArray));
-    } catch (error) {
-      throw new Error(`Failed to get keypair for wallet ${wallet.address}: ${error.message}`);
-    }
-  }
-
-  private decryptPrivateKey(encryptedKey: string): string {
-    const key = this.config.get<string>('ENCRYPTION_KEY');
-    if (!key) {
-      throw new Error('ENCRYPTION_KEY not found in environment variables');
-    }
-    // The IV should be stored alongside the encrypted data, or you must know how it was generated.
-    // Here, we assume the IV is prefixed to the encryptedKey as hex (32 chars for 16 bytes IV).
-    const ivLength = 16; // For AES, this is always 16
-    const ivHexLength = ivLength * 2;
-    const ivHex = encryptedKey.slice(0, ivHexLength);
-    const encryptedHex = encryptedKey.slice(ivHexLength);
-    const iv = Buffer.from(ivHex, 'hex');
-    const encrypted = Buffer.from(encryptedHex, 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key, 'utf8'), iv);
-    let decrypted = decipher.update(encrypted, undefined, 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
-  }
-
   private selectRandomWallets(wallets: BotWallet[], count: number): BotWallet[] {
     const shuffled = [...wallets].sort(() => 0.5 - Math.random());
     return shuffled.slice(0, Math.min(count, wallets.length));
   }
 
   private getRandomInRange(min: number, max: number): number {
-    return Math.random() * (max - min) + min;
+    return Number((Number(Math.random() * (max - min)) + Number(min)).toFixed(9));
   }
 
   private calculateBettingStrategy(roundInfo: RoundInfo, botConfig: BotConfig): any {
-    const totalPool = roundInfo.upPool + roundInfo.downPool;
-    const currentUpRatio = totalPool > 0 ? roundInfo.upPool / totalPool : 0.5;
+    const totalPool = roundInfo.totalBullAmount + roundInfo.totalBearAmount;
+    const currentUpRatio = totalPool > 0 ? roundInfo.totalBullAmount / totalPool : 0.5;
     const currentDownRatio = 1 - currentUpRatio;
     
     // Calculate target ratios from config (normalized to 0-1 range)
-    const targetUpRange = (botConfig.upBalanceFrom + botConfig.upBalanceTo) / 2;
-    const targetDownRange = (botConfig.downBalanceFrom + botConfig.downBalanceTo) / 2;
+    const targetUpRange = this.getRandomInRange(botConfig.upDownBalanceFrom, botConfig.upDownBalanceTo);
+    const targetDownRange = targetUpRange
     const totalTargetRange = targetUpRange + targetDownRange;
     
     const targetUpRatio = targetUpRange / totalTargetRange;
@@ -348,8 +315,8 @@ export class BotEngineService {
       targetUpRatio: targetUpRatio * 100,
       targetDownRatio: targetDownRatio * 100,
       totalPool,
-      upPool: roundInfo.upPool,
-      downPool: roundInfo.downPool,
+      upPool: roundInfo.totalBullAmount,
+      downPool: roundInfo.totalBearAmount,
       message: `Current: UP ${(currentUpRatio * 100).toFixed(1)}% | DOWN ${(currentDownRatio * 100).toFixed(1)}% | Target: UP ${(targetUpRatio * 100).toFixed(1)}% | DOWN ${(targetDownRatio * 100).toFixed(1)}% | Favoring: ${favorUp ? 'UP' : 'DOWN'}`
     };
   }
@@ -380,7 +347,7 @@ export class BotEngineService {
       recentBets: recentBets.length,
       config: {
         walletCountRange: `${config.walletCountFrom}-${config.walletCountTo}`,
-        betAmountRange: `${config.minBetFrom}-${config.maxBetFrom} SOL`,
+        betAmountRange: `${config.minBet}-${config.maxBet} SOL`,
         betTimeRange: `${config.betTimeFrom}-${config.betTimeTo}s`,
         epochRange: config.epochFrom && config.epochTo ? `${config.epochFrom}-${config.epochTo}` : 'All rounds'
       }
