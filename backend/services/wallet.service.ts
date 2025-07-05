@@ -1,7 +1,8 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { BotWallet } from '../entities/wallet.entity';
+import { BetHistory } from '../entities/bet-history.entity';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { ConfigService } from '@nestjs/config';
 import { Web3Service } from './web3.service';
@@ -17,6 +18,8 @@ export class WalletService {
   constructor(
     @InjectRepository(BotWallet)
     private walletRepository: Repository<BotWallet>,
+    @InjectRepository(BetHistory)
+    private betHistoryRepository: Repository<BetHistory>,
     private configService: ConfigService,
     private web3Service: Web3Service,
   ) {
@@ -191,11 +194,170 @@ export class WalletService {
     }
   }
 
+  async collectFromWallet(walletId: number): Promise<any> {
+    const wallet = await this.walletRepository.findOne({ where: { id: walletId, isActive: true } });
+    
+    if (!wallet) {
+      throw new NotFoundException('Wallet not found');
+    }
+
+    if (wallet.balance <= 0.001) {
+      throw new BadRequestException('Wallet has insufficient balance to collect');
+    }
+
+    try {
+      const keypair = await this.getWalletKeypair(wallet);
+      
+      const balance = await this.connection.getBalance(keypair.publicKey);
+      const amountToTransfer = Math.max(0, balance - 5000); // Leave 5000 lamports for fees
+      
+      if (amountToTransfer > 0) {
+        const transaction = new Transaction();
+        transaction.add(
+          SystemProgram.transfer({
+            fromPubkey: keypair.publicKey,
+            toPubkey: this.mainWallet.publicKey,
+            lamports: amountToTransfer,
+          })
+        );
+
+        const signature = await this.connection.sendTransaction(transaction, [keypair]);
+        await this.connection.confirmTransaction(signature);
+        
+        // Update database
+        const collectedAmount = amountToTransfer / LAMPORTS_PER_SOL;
+        wallet.balance = 0;
+        await this.walletRepository.save(wallet);
+        
+        this.logger.log(`Collected ${collectedAmount} SOL from ${wallet.address}`);
+        
+        return {
+          walletAddress: wallet.address,
+          collectedAmount,
+          signature
+        };
+      } else {
+        throw new BadRequestException('No collectible amount after transaction fees');
+      }
+    } catch (error) {
+      this.logger.error(`Failed to collect from wallet ${wallet.address}:`, error);
+      throw error;
+    }
+  }
+
   async getWallets(): Promise<BotWallet[]> {
     return await this.walletRepository.find({ 
       where: { isActive: true },
       select: ['id', 'address', 'balance', 'isActive', 'createdAt', 'updatedAt']
     });
+  }
+
+  async getWalletsWithRewards(): Promise<any[]> {
+    const wallets = await this.walletRepository.find({ 
+      where: { isActive: true },
+      select: ['id', 'address', 'balance', 'isActive', 'createdAt', 'updatedAt']
+    });
+
+    const walletsWithRewards = await Promise.all(
+      wallets.map(async (wallet) => {
+        const unclaimedRewards = await this.getUnclaimedRewards(wallet.address);
+        return {
+          ...wallet,
+          unclaimedRewards
+        };
+      })
+    );
+
+    return walletsWithRewards;
+  }
+
+  async getUnclaimedRewards(walletAddress: string): Promise<number> {
+    // Get pending/won bets that haven't been claimed yet
+    const unclaimedBets = await this.betHistoryRepository.find({
+      where: { 
+        walletAddress,
+        status: 'won'
+      }
+    });
+
+    // Calculate total unclaimed rewards (simplified calculation)
+    const totalRewards = unclaimedBets.reduce((sum, bet) => {
+      return sum + (bet.payout || 0);
+    }, 0);
+
+    return Number(totalRewards.toFixed(6));
+  }
+
+  async claimWalletRewards(walletId: number): Promise<any> {
+    const wallet = await this.walletRepository.findOne({ where: { id: walletId, isActive: true } });
+    
+    if (!wallet) {
+      throw new NotFoundException('Wallet not found');
+    }
+
+    // Get unclaimed winning bets
+    const unclaimedBets = await this.betHistoryRepository.find({
+      where: { 
+        walletAddress: wallet.address,
+        status: 'won'
+      }
+    });
+
+    if (unclaimedBets.length === 0) {
+      throw new BadRequestException('No unclaimed rewards found');
+    }
+
+    const keypair = await this.getWalletKeypair(wallet);
+    const results: { epoch: number; amount: number; signature: string | undefined }[] = [];
+    let totalClaimed = 0;
+
+    for (const bet of unclaimedBets) {
+      try {
+        const claimResult = await this.web3Service.claimPayout(keypair, bet.epoch);
+        
+        if (claimResult.success) {
+          // Update bet status to claimed
+          bet.status = 'won'; // Keep as won but mark as processed
+          await this.betHistoryRepository.save(bet);
+          
+          totalClaimed += bet.payout || 0;
+          results.push({
+            epoch: bet.epoch,
+            amount: bet.payout,
+            signature: claimResult.signature
+          });
+        }
+      } catch (error) {
+        this.logger.error(`Failed to claim reward for epoch ${bet.epoch}:`, error);
+      }
+    }
+
+    return {
+      walletAddress: wallet.address,
+      totalClaimed,
+      claimedBets: results
+    };
+  }
+
+  async removeWallet(walletId: number): Promise<void> {
+    const wallet = await this.walletRepository.findOne({ where: { id: walletId } });
+    
+    if (!wallet) {
+      throw new NotFoundException('Wallet not found');
+    }
+
+    // Collect any remaining funds first
+    if (wallet.balance > 0.001) {
+      try {
+        await this.collectFromWallet(walletId);
+      } catch (error) {
+        this.logger.warn(`Failed to collect funds before removing wallet ${wallet.address}:`, error);
+      }
+    }
+
+    // Mark wallet as inactive instead of deleting
+    wallet.isActive = false;
+    await this.walletRepository.save(wallet);
   }
 
   async updateWalletBalances(): Promise<void> {

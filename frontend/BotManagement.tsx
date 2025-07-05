@@ -6,17 +6,35 @@ import { HiMiniPlayPause } from "react-icons/hi2";
 import axios from "axios";
 import avatarIcon from "../../assets/Avatar.png";
 import NumberFlow from '@number-flow/react'
-import solIcon from "../../assets/sol-icon.png"; ;
+import solIcon from "../../assets/sol-icon.png";
+import { BiCoin } from "react-icons/bi";
+import { FiRefreshCw } from "react-icons/fi";
+import { FaTrash } from "react-icons/fa6";
 import { DotLoader } from "react-spinners";
 import { ArrowDown, ArrowUp } from "lucide-react";
+import toast from "react-hot-toast";
 
 interface BotWallet {
   id: number;
   address: string;
   balance: number;
+  unclaimedRewards: number; // Add this line
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+interface RoundInfo {
+  number: number;
+  startTime: number;
+  lockTime: number;
+  closeTime: number;
+  lockPrice: number;
+  endPrice: number;
+  isActive: boolean;
+  totalBullAmount: number;
+  totalBearAmount: number;
+  totalAmount: number;
 }
 
 interface BotConfig {
@@ -54,16 +72,16 @@ const API_BASE_URL = "https://sol-prediction-backend-6e3r.onrender.com/bot-manag
 export default function BotManagement() {
   const [config, setConfig] = useState<BotConfig>({
     id: 0,
-    minBet: 0,
-    maxBet: 0,
+    minBet: 0.001,      // Change from 0
+    maxBet: 0.01,       // Change from 0
     epochFrom: 0,
     epochTo: 0,
     betTimeFrom: 0,
     betTimeTo: 180,
     walletCountFrom: 1,
     walletCountTo: 10,
-    upDownBalanceFrom: 0,
-    upDownBalanceTo: 0,
+    upDownBalanceFrom: 1,  // Change from 0
+    upDownBalanceTo: 2,    // Change from 0
     status: "stopped",
     isActive: true,
     createdAt: "",
@@ -72,6 +90,8 @@ export default function BotManagement() {
 
   const [wallets, setWallets] = useState<BotWallet[]>([]);
   const [betHistory, setBetHistory] = useState<BetHistory[]>([]);
+  const [currentRound, setCurrentRound] = useState<RoundInfo | null>(null);
+  const [livePrice, setLivePrice] = useState(245.8372);
   const [distributionConfig, setDistributionConfig] = useState({
     totalAmount: "",
     minAmount: "",
@@ -93,10 +113,23 @@ export default function BotManagement() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const priceInterval = setInterval(() => {
+      setLivePrice(prev => {
+        const change = (Math.random() - 0.5) * 2; // Random change between -1 and 1
+        return Number((prev + change).toFixed(4));
+      });
+    }, 2000);
+
+    return () => clearInterval(priceInterval);
+  }, []);
+
   // Load initial data
   useEffect(() => {
     loadConfig();
     loadWallets();
+    loadBettingHistory();
+    loadCurrentRound();
   }, []);
 
   const loadConfig = async () => {
@@ -111,6 +144,29 @@ export default function BotManagement() {
     }
   };
 
+  const loadBettingHistory = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/betting-history`);
+      if (response.data.success) {
+        setBetHistory(response.data.data);
+      }
+    } catch (error) {
+      console.error("Failed to load betting history:", error);
+    }
+  };
+
+  const loadCurrentRound = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/current-round`);
+      if (response.data.success) {
+        setCurrentRound(response.data.data);
+      }
+    } catch (error) {
+      console.error("Failed to load current round:", error);
+    }
+  };
+
+  // 7. Update loadWallets function
   const loadWallets = async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/wallets`);
@@ -119,13 +175,62 @@ export default function BotManagement() {
           response.data.data.map((w: any) => ({
             ...w,
             balance: Number(w.balance) || 0,
+            unclaimedRewards: Number(w.unclaimedRewards) || 0, // Add this line
           }))
         );
-
       }
     } catch (error) {
       console.error("Failed to load wallets:", error);
       message.error("Failed to load wallets");
+    }
+  };
+
+  // 8. Add new wallet action functions
+  const handleClaimRewards = async (walletId: number) => {
+    try {
+      setLoading(true);
+      const response = await axios.post(`${API_BASE_URL}/wallets/${walletId}/claim`);
+      if (response.data.success) {
+        message.success("Rewards claimed successfully!");
+        await loadWallets();
+      }
+    } catch (error) {
+      console.error("Failed to claim rewards:", error);
+      message.error("Failed to claim rewards");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCollectFromWallet = async (walletId: number) => {
+    try {
+      setLoading(true);
+      const response = await axios.post(`${API_BASE_URL}/wallets/${walletId}/collect`);
+      if (response.data.success) {
+        message.success("Funds collected successfully!");
+        await loadWallets();
+      }
+    } catch (error) {
+      console.error("Failed to collect funds:", error);
+      message.error("Failed to collect funds");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRemoveWallet = async (walletId: number) => {
+    try {
+      setLoading(true);
+      const response = await axios.delete(`${API_BASE_URL}/wallets/${walletId}`);
+      if (response.data.success) {
+        message.success("Wallet removed successfully!");
+        await loadWallets();
+      }
+    } catch (error) {
+      console.error("Failed to remove wallet:", error);
+      message.error("Failed to remove wallet");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -149,14 +254,27 @@ export default function BotManagement() {
   const handleSetConfig = async () => {
     try {
       setLoading(true);
-      const response = await axios.post(`${API_BASE_URL}/config`, config);
+      
+      const response = await axios.post(`${API_BASE_URL}/config`, {
+        betTimeFrom: Number(config.betTimeFrom),
+        betTimeTo: Number(config.betTimeTo),
+        upDownBalanceFrom: Number(config.upDownBalanceFrom),
+        upDownBalanceTo: Number(config.upDownBalanceTo),
+        walletCountFrom: Number(config.walletCountFrom),
+        walletCountTo: Number(config.walletCountTo),
+        minBet: Number(config.minBet),
+        maxBet: Number(config.maxBet),
+        epochFrom: Number(config.epochFrom),
+        epochTo: Number(config.epochTo),
+        status: config.status,
+      });
       if (response.data.success) {
-        message.success("Bot configuration updated successfully!");
+        toast.success("Bot configuration updated successfully!");
         setConfig(response.data.data);
       }
     } catch (error) {
       console.error("Failed to update config:", error);
-      message.error("Failed to update bot configuration");
+      toast.error("Failed to update bot configuration");
     } finally {
       setLoading(false);
     }
@@ -412,6 +530,8 @@ export default function BotManagement() {
                       <th className="py-2 px-4 text-left">User</th>
                       <th className="py-2 px-2 text-center">Wallet Address</th>
                       <th className="py-2 px-4 text-center">Balance</th>
+                      <th className="py-2 px-4 text-center">Unclaimed Rewards</th>
+                      <th className="py-2 px-4 text-center">Actions</th>
                     </tr>
                   </thead>
                 </table>
@@ -436,12 +556,44 @@ export default function BotManagement() {
                           <span className={`font-semibold ${Number(wallet.balance) > 0 ? 'text-green-400' : 'text-gray-400'}`}>
                             {Number(wallet.balance || 0).toFixed(4)} SOL
                           </span>
-
+                        </td>
+                        <td className="py-2 px-4 text-center">
+                          <span className={`font-semibold ${Number(wallet.unclaimedRewards) > 0 ? 'text-yellow-400' : 'text-gray-400'}`}>
+                            {Number(wallet.unclaimedRewards || 0).toFixed(4)} SOL
+                          </span>
+                        </td>
+                        <td className="py-2 px-4 text-center">
+                          <div className="flex gap-1 justify-center">
+                            <button
+                              onClick={() => handleClaimRewards(wallet.id)}
+                              disabled={loading || wallet.unclaimedRewards <= 0}
+                              className="px-2 py-1 text-xs bg-yellow-500 hover:bg-yellow-600 disabled:bg-gray-500 disabled:cursor-not-allowed rounded text-white font-semibold"
+                              title="Claim Rewards"
+                            >
+                              <BiCoin className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={() => handleCollectFromWallet(wallet.id)}
+                              disabled={loading || wallet.balance <= 0.001}
+                              className="px-2 py-1 text-xs bg-green-500 hover:bg-green-600 disabled:bg-gray-500 disabled:cursor-not-allowed rounded text-white font-semibold"
+                              title="Collect Funds"
+                            >
+                              <FiRefreshCw className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={() => handleRemoveWallet(wallet.id)}
+                              disabled={loading}
+                              className="px-2 py-1 text-xs bg-red-500 hover:bg-red-600 disabled:bg-gray-500 disabled:cursor-not-allowed rounded text-white font-semibold"
+                              title="Remove Wallet"
+                            >
+                              <FaTrash className="w-3 h-3" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )) : (
                       <tr>
-                        <td colSpan={3} className="text-center py-8 text-gray-400">
+                        <td colSpan={5} className="text-center py-8 text-gray-400">
                           No wallets generated yet
                         </td>
                       </tr>
@@ -515,7 +667,7 @@ export default function BotManagement() {
                 <div className="flex justify-between items-center">
                   <span className="opacity-70">Live Price</span>
                   <NumberFlow
-                    value={Math.random() * 100 + 20}
+                    value={livePrice}
                     format={{
                       style: "currency",
                       currency: "USD",
@@ -532,12 +684,12 @@ export default function BotManagement() {
 
                 <div className="flex justify-between items-center">
                   <span className="font-semibold">Locked Price</span>
-                  <span className="font-semibold">$250</span>
+                  <span className="font-semibold">${currentRound?.lockPrice || 250}</span>
                 </div>
 
                 <div className="flex justify-between items-center">
                   <span className="font-bold">Prize Pool</span>
-                  <span className="font-semibold">100 SOL</span>
+                  <span className="font-semibold">{currentRound?.totalAmount || 100} SOL</span>
                 </div>
               </div>
 
@@ -561,9 +713,9 @@ export default function BotManagement() {
             <div className="space-y-6">
               {[
                 { label: "Bet Time", fromKey: "betTimeFrom", toKey: "betTimeTo", unit: "seconds" },
-                { label: "UpDown Balance", fromKey: "updownBalanceFrom", toKey: "updownBalanceTo", unit: "ratio" },
+                { label: "UpDown Balance", fromKey: "upDownBalanceFrom", toKey: "upDownBalanceTo", unit: "ratio" },
                 { label: "Wallet Count", fromKey: "walletCountFrom", toKey: "walletCountTo", unit: "count" },
-                { label: "Bet Amount", fromKey: "minBetAmount", toKey: "maxBetAmount", unit: "SOL" },
+                { label: "Bet Amount", fromKey: "minBet", toKey: "maxBet", unit: "SOL" }, // Changed from minBetAmount/maxBetAmount
                 { label: "Working Epoch", fromKey: "epochFrom", toKey: "epochTo", unit: "epoch" },
               ].map(({ label, fromKey, toKey, unit }) => (
                 <div key={label} className="flex flex-col gap-2">

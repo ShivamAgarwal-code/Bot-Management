@@ -3,6 +3,16 @@ import { IsNumber, IsOptional, Min, Max } from 'class-validator';
 export class BotConfigDto {
   @IsOptional()
   @IsNumber()
+  @Min(0.0001)
+  minBet?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.001)
+  maxBet?: number;
+
+  @IsOptional()
+  @IsNumber()
   betTimeFrom?: number;
 
   @IsOptional()

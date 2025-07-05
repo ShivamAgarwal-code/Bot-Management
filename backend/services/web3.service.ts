@@ -73,8 +73,8 @@ export class Web3Service {
 
     } catch (error) {
       this.logger.error(`Failed to place bet:`, error);
-      return { 
-        success: false, 
+      return {
+        success: false,
         error: error.message || 'Unknown error occurred'
       };
     }
@@ -124,6 +124,13 @@ export class Web3Service {
       const roundPda = getRoundPda(roundId);
       const userBetPda = getUserBetPda(walletKeypair.publicKey, roundId);
 
+      console.log({
+        config: configPda.toBase58(),
+        round: roundPda.toBase58(),
+        userBet: userBetPda.toBase58(),
+        user: walletKeypair.publicKey.toBase58(),
+        treasury: treasuryPda.toBase58()
+      })
       const tx = await program.methods
         .placeBet(
           new anchor.BN(amount * LAMPORTS_PER_SOL),
@@ -145,12 +152,12 @@ export class Web3Service {
 
     } catch (error) {
       this.logger.error("Error in placeBetOnChain:", error);
-      
+
       if (error.message?.includes("This transaction has already been processed")) {
         this.logger.log("Transaction already processed");
         return null;
       }
-      
+
       throw error;
     }
   }
@@ -167,28 +174,87 @@ export class Web3Service {
 
   async claimPayout(walletKeypair: Keypair, roundId: number): Promise<BetResult> {
     try {
-      const mockWallet = {
-        publicKey: walletKeypair.publicKey,
-        signTransaction: async (transaction: Transaction) => {
-          transaction.partialSign(walletKeypair);
-          return transaction;
-        },
-      };
+      this.logger.log(`Claiming payout for round ${roundId} with wallet ${walletKeypair.publicKey.toString()}`);
 
-      const signature = await this.claimPayoutOnChain(
-        this.connection,
-        this.programId,
-        walletKeypair.publicKey,
-        walletKeypair.publicKey,
-        mockWallet.signTransaction,
-        null,
-        roundId
+      // Derive PDAs (Program Derived Addresses)
+      const [configPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("config")],
+        this.programId
       );
 
-      return { success: true, signature };
+      const [treasuryPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("treasury")],
+        this.programId
+      );
+
+      const getRoundPda = (roundNumber: number) =>
+        PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("round"),
+            new anchor.BN(roundNumber).toArrayLike(Buffer, "le", 8),
+          ],
+          this.programId
+        )[0];
+
+      const getUserBetPda = (user: PublicKey, roundNumber: number) =>
+        PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("user_bet"),
+            user.toBuffer(),
+            new anchor.BN(roundNumber).toArrayLike(Buffer, "le", 8),
+          ],
+          this.programId
+        )[0];
+
+      const provider = new AnchorProvider(this.connection, new anchor.Wallet(walletKeypair), {
+        commitment: BLOCKCHAIN_CONFIG.CONFIRMATION_COMMITMENT
+      });
+
+      const program = new anchor.Program(idl as any, this.programId, provider);
+      const roundPda = getRoundPda(roundId);
+      const userBetPda = getUserBetPda(walletKeypair.publicKey, roundId);
+
+      // Check if the bet exists and is claimable
+      try {
+        const userBetAccount: any = await program.account.userBet.fetch(userBetPda);
+        if (userBetAccount?.claimed) {
+          return { success: false, error: 'Rewards already claimed for this round' };
+        }
+      } catch (error) {
+        return { success: false, error: 'No bet found for this round' };
+      }
+
+      const tx = await program.methods
+        .claimPayout(new anchor.BN(roundId))
+        .accounts({
+          config: configPda,
+          round: roundPda,
+          userBet: userBetPda,
+          user: walletKeypair.publicKey,
+          treasury: treasuryPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([walletKeypair])
+        .rpc();
+
+      this.logger.log(`Payout claimed successfully. Signature: ${tx}`);
+      return { success: true, signature: tx };
+
     } catch (error) {
       this.logger.error(`Failed to claim payout:`, error);
-      return { success: false, error: error.message };
+
+      if (error.message?.includes("already claimed")) {
+        return { success: false, error: 'Rewards already claimed' };
+      }
+
+      if (error.message?.includes("No rewards available")) {
+        return { success: false, error: 'No rewards available for this round' };
+      }
+
+      return {
+        success: false,
+        error: error.message || 'Unknown error occurred during claim'
+      };
     }
   }
 

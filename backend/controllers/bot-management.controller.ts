@@ -1,7 +1,8 @@
-import { Controller, Get, Post, Body, Put, Param } from '@nestjs/common';
+import { Controller, Get, Post, Body, Put, Param, Delete } from '@nestjs/common';
 import { WalletService } from '../services/wallet.service';
 import { BotConfigService } from '../services/bot-config.service';
 import { BotEngineService } from '../services/bot-engine.service';
+import { Web3Service } from '../services/web3.service';
 import { DistributeDto } from '../dto/wallet-config.dto';
 import { BotConfigDto } from '../dto/bot-config.dto';
 
@@ -11,6 +12,7 @@ export class BotManagementController {
     private walletService: WalletService,
     private configService: BotConfigService,
     private botEngineService: BotEngineService,
+    private web3Service: Web3Service,
   ) {}
 
   // Wallet Management Endpoints
@@ -49,7 +51,7 @@ export class BotManagementController {
 
   @Get('wallets')
   async getWallets() {
-    const wallets = await this.walletService.getWallets();
+    const wallets = await this.walletService.getWalletsWithRewards();
     return {
       success: true,
       data: wallets
@@ -63,6 +65,56 @@ export class BotManagementController {
       success: true,
       message: 'Wallet balances updated'
     };
+  }
+
+  @Post('wallets/:id/claim')
+  async claimWalletRewards(@Param('id') walletId: number) {
+    try {
+      const result = await this.walletService.claimWalletRewards(walletId);
+      return {
+        success: true,
+        message: 'Rewards claimed successfully',
+        data: result
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  }
+
+  @Post('wallets/:id/collect')
+  async collectFromWallet(@Param('id') walletId: number) {
+    try {
+      const result = await this.walletService.collectFromWallet(walletId);
+      return {
+        success: true,
+        message: 'Funds collected successfully',
+        data: result
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  }
+
+  @Delete('wallets/:id')
+  async removeWallet(@Param('id') walletId: number) {
+    try {
+      await this.walletService.removeWallet(walletId);
+      return {
+        success: true,
+        message: 'Wallet removed successfully'
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
   }
 
   // Bot Configuration Endpoints
@@ -87,7 +139,6 @@ export class BotManagementController {
 
   @Post('config/status')
   async updateStatus(@Body() { status }: { status: 'stopped' | 'running' | 'paused' }) {
-    const config = await this.configService.updateStatus(status);
     
     if (status === 'running') {
       await this.botEngineService.startBot();
@@ -98,7 +149,6 @@ export class BotManagementController {
     return {
       success: true,
       message: `Bot status updated to ${status}`,
-      data: config
     };
   }
 
@@ -119,5 +169,40 @@ export class BotManagementController {
       success: true,
       message: 'Bot stopped successfully'
     };
+  }
+
+  // Bot Status and History Endpoints
+  @Get('status')
+  async getBotStatus() {
+    const status = await this.botEngineService.getBotStatus();
+    return {
+      success: true,
+      data: status
+    };
+  }
+
+  @Get('betting-history')
+  async getBettingHistory() {
+    const history = await this.botEngineService.getBettingHistory();
+    return {
+      success: true,
+      data: history
+    };
+  }
+
+  @Get('current-round')
+  async getCurrentRound() {
+    try {
+      const roundInfo = await this.botEngineService.getCurrentRoundInfo();
+      return {
+        success: true,
+        data: roundInfo
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
   }
 }

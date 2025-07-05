@@ -18,7 +18,6 @@ import { Interval } from '@nestjs/schedule';
 @Injectable()
 export class BotEngineService {
   private readonly logger = new Logger(BotEngineService.name);
-  private isRunning = false;
   private currentRoundId = 0;
   private roundCheckInterval: NodeJS.Timeout;
   private betExecutionInterval: NodeJS.Timeout;
@@ -34,13 +33,9 @@ export class BotEngineService {
     private betHistoryRepository: Repository<BetHistory>,
     @InjectRepository(BotWallet)
     private walletRepository: Repository<BotWallet>,
-  ) {}
+  ) { }
 
   async startBot(): Promise<void> {
-    if (this.isRunning) {
-      throw new BadRequestException('Bot is already running');
-    }
-
     const botConfig = await this.configService.getConfig();
     if (botConfig.status !== 'running') {
       await this.configService.updateStatus('running');
@@ -52,7 +47,6 @@ export class BotEngineService {
       throw new BadRequestException('No active wallets found. Please generate wallets first.');
     }
 
-    this.isRunning = true;
     this.logger.log('🚀 Bot engine started successfully');
     this.logger.log(`📊 Active wallets: ${wallets.length}`);
 
@@ -61,31 +55,36 @@ export class BotEngineService {
   }
 
   async stopBot(): Promise<void> {
-    this.isRunning = false;
-    
+
     if (this.roundCheckInterval) {
       clearInterval(this.roundCheckInterval);
     }
-    
+
     if (this.betExecutionInterval) {
       clearInterval(this.betExecutionInterval);
     }
-    
+
     await this.configService.updateStatus('stopped');
     this.logger.log('🛑 Bot engine stopped');
   }
 
   @Interval(5000)
   private async startRoundMonitoring(): Promise<void> {
+    const botConfig = await this.configService.getConfig();
+    if (botConfig.status !== 'running') {
+      this.logger.log('⏸️ Bot is not in running state, skipping round');
+        return;
+    }
+
     this.logger.log('🔍 Starting round monitoring...');
-    
+
     try {
       const currentRound = await this.adminDashboardService.getNextRoundInfo();
       if (currentRound && currentRound.number !== this.currentRoundId) {
         this.logger.log(`🎯 New round detected: ${currentRound.number}`);
         this.logger.log(`📈 Round status: ${currentRound.status}`);
         this.logger.log(`💰 Pools - UP: ${currentRound.totalBullAmount} SOL, DOWN: ${currentRound.totalBearAmount} SOL`);
-        
+
         this.currentRoundId = currentRound.number;
         this.roundStartTime = currentRound.startTime;
         
@@ -100,7 +99,7 @@ export class BotEngineService {
   private async scheduleRoundBetting(roundInfo: RoundInfo): Promise<void> {
     try {
       const botConfig = await this.configService.getConfig();
-      
+
       if (botConfig.status !== 'running') {
         this.logger.log('⏸️ Bot is not in running state, skipping round');
         return;
@@ -116,11 +115,11 @@ export class BotEngineService {
 
       // Calculate when to start betting (random time within configured range)
       const betStartDelay = this.getRandomInRange(botConfig.betTimeFrom, botConfig.betTimeTo) * 1000;
-      
-      this.logger.log(`⏰ Scheduling bets for round ${roundInfo.number} in ${betStartDelay/1000} seconds`);
+
+      this.logger.log(`⏰ Scheduling bets for round ${roundInfo.number} in ${betStartDelay / 1000} seconds`);
       
       setTimeout(async () => {
-        if (botConfig.status === 'running' && this.currentRoundId === roundInfo.number) {
+        if (botConfig.status === 'running') {
           await this.executeRoundStrategy(roundInfo);
         }
       }, betStartDelay);
@@ -133,9 +132,15 @@ export class BotEngineService {
   private async executeRoundStrategy(roundInfo: RoundInfo): Promise<void> {
     try {
       this.logger.log(`🎲 Executing betting strategy for round ${roundInfo.number}`);
-      
+
+      // Get fresh config for each round
       const botConfig = await this.configService.getConfig();
-      
+
+      if (botConfig.status !== 'running') {
+        this.logger.log('⏸️ Bot is not in running state, skipping round');
+        return;
+      }
+
       // Check if round is still open
       const currentRound = await this.adminDashboardService.getNextRoundInfo();
       if (!currentRound || currentRound.number !== roundInfo.number) {
@@ -143,7 +148,7 @@ export class BotEngineService {
         return;
       }
 
-      // Get active wallets with sufficient balance
+      // Get active wallets with sufficient balance using current config
       const allWallets = await this.getActiveWalletsWithBalance(botConfig);
       if (allWallets.length === 0) {
         this.logger.warn('⚠️ No active wallets with sufficient balance found');
@@ -156,12 +161,13 @@ export class BotEngineService {
         allWallets.length
       );
       const selectedWallets = this.selectRandomWallets(allWallets, walletCount);
-      
+
       this.logger.log(`👥 Selected ${selectedWallets.length} wallets for round ${roundInfo.number}`);
+      this.logger.log(`🎯 Config: Bet ${botConfig.minBet}-${botConfig.maxBet} SOL, Time ${botConfig.betTimeFrom}-${botConfig.betTimeTo}s`);
 
       // Calculate betting strategy based on current pool ratios
       const strategy = this.calculateBettingStrategy(currentRound, botConfig);
-      this.logger.log(`📊 Betting strategy:`, strategy.message);
+      this.logger.log(`📊 Betting strategy: ${strategy.message}`);
 
       // Execute bets for selected wallets with staggered timing
       await this.executeBetsWithDelay(selectedWallets, currentRound, strategy, botConfig);
@@ -174,7 +180,7 @@ export class BotEngineService {
   private async getActiveWalletsWithBalance(botConfig: BotConfig): Promise<BotWallet[]> {
     const minBetAmount = Math.min(botConfig.minBet, botConfig.maxBet);
     const minRequiredBalance = minBetAmount + 0.002; // Add buffer for transaction fees
-    
+
     return await this.walletRepository.find({
       where: {
         isActive: true,
@@ -183,23 +189,31 @@ export class BotEngineService {
   }
 
   private async executeBetsWithDelay(
-    wallets: BotWallet[], 
-    roundInfo: RoundInfo, 
-    strategy: any, 
+    wallets: BotWallet[],
+    roundInfo: RoundInfo,
+    strategy: any,
     botConfig: BotConfig
   ): Promise<void> {
     for (let i = 0; i < wallets.length; i++) {
+      const botConfig = await this.configService.getConfig();
+
+      if (botConfig.status !== 'running') {
+        this.logger.log('⏸️ Bot is not in running state, skipping round');
+        return;
+      }
+
       const wallet = wallets[i];
-      
+
       // Add random delay between bets (1-5 seconds)
       if (i > 0) {
-        const delay = Math.random() * 200; // 1-5 seconds
+        const delay = Math.random() * 50; // 1-5 seconds
         await this.sleep(delay);
       }
 
       // Check if bot is still running and round is still valid
-      if (botConfig.status !== 'running') break;
-        
+      const currentConfig = await this.configService.getConfig();
+      if (currentConfig.status !== 'running') break;
+
       const currentRound = await this.adminDashboardService.getNextRoundInfo();
       if (!currentRound || currentRound.number !== roundInfo.number) {
         this.logger.log(`🔒 Round ${roundInfo.number} closed during betting, stopping remaining bets`);
@@ -215,16 +229,16 @@ export class BotEngineService {
   }
 
   private async executeBetForWallet(
-    wallet: BotWallet, 
-    roundInfo: RoundInfo, 
-    strategy: any, 
+    wallet: BotWallet,
+    roundInfo: RoundInfo,
+    strategy: any,
     botConfig: BotConfig
   ): Promise<void> {
     try {
       // Determine bet direction based on strategy
       const direction = this.decideBetDirection(strategy);
-      
-      // Calculate bet amount
+
+      // Calculate bet amount using the correct config properties
       const betAmount = this.getRandomInRange(botConfig.minBet, botConfig.maxBet);
 
       // Validate bet amount against wallet balance
@@ -259,14 +273,14 @@ export class BotEngineService {
 
       if (betResult.success && betResult.signature) {
         this.logger.log(`✅ Bet placed successfully: ${wallet.address.slice(0, 8)}... | ${direction ? 'UP' : 'DOWN'} | ${betAmount} SOL | Tx: ${betResult.signature.slice(0, 8)}...`);
-        
+
         // Update wallet balance
         wallet.balance = Number((wallet.balance - betAmount).toFixed(9));
         await this.walletRepository.save(wallet);
-        
+
       } else {
         this.logger.error(`❌ Bet failed: ${wallet.address.slice(0, 8)}... | Error: ${betResult.error}`);
-        
+
         // Update bet history with failure
         savedBetHistory.status = 'lost';
         await this.betHistoryRepository.save(savedBetHistory);
@@ -290,23 +304,23 @@ export class BotEngineService {
     const totalPool = roundInfo.totalBullAmount + roundInfo.totalBearAmount;
     const currentUpRatio = totalPool > 0 ? roundInfo.totalBullAmount / totalPool : 0.5;
     const currentDownRatio = 1 - currentUpRatio;
-    
+
     // Calculate target ratios from config (normalized to 0-1 range)
     const targetUpRange = this.getRandomInRange(botConfig.upDownBalanceFrom, botConfig.upDownBalanceTo);
-    const targetDownRange = targetUpRange
+    const targetDownRange = targetUpRange;
     const totalTargetRange = targetUpRange + targetDownRange;
-    
+
     const targetUpRatio = targetUpRange / totalTargetRange;
     const targetDownRatio = targetDownRange / totalTargetRange;
-    
+
     // Determine betting preference based on pool imbalance
     const upDeficit = targetUpRatio - currentUpRatio;
     const downDeficit = targetDownRatio - currentDownRatio;
-    
+
     // Favor the direction that needs more balance
     const favorUp = upDeficit > downDeficit;
     const upProbability = favorUp ? 0.75 : 0.25;
-    
+
     return {
       favorUp,
       upProbability,
@@ -339,7 +353,7 @@ export class BotEngineService {
     });
 
     return {
-      isRunning: this.isRunning,
+      isRunning: config.status === 'running',
       status: config.status,
       currentRoundId: this.currentRoundId,
       activeWallets: wallets.length,
@@ -361,15 +375,25 @@ export class BotEngineService {
     });
   }
 
+  async getCurrentRoundInfo(): Promise<RoundInfo> {
+    try {
+      const roundInfo = await this.adminDashboardService.getNextRoundInfo();
+      return roundInfo;
+    } catch (error) {
+      this.logger.error('Failed to get current round info:', error);
+      throw new Error('Unable to fetch current round information');
+    }
+  }
+
   async getRoundStats(roundId?: number): Promise<any> {
     const query = this.betHistoryRepository.createQueryBuilder('bet');
-    
+
     if (roundId) {
       query.where('bet.epoch = :roundId', { roundId });
     }
-    
+
     const bets = await query.getMany();
-    
+
     const stats = {
       totalBets: bets.length,
       totalAmount: bets.reduce((sum, bet) => sum + Number(bet.amount), 0),
