@@ -13,7 +13,7 @@ export class BotManagementController {
     private configService: BotConfigService,
     private botEngineService: BotEngineService,
     private web3Service: Web3Service,
-  ) {}
+  ) { }
 
   // Wallet Management Endpoints
   @Post('wallets/generate')
@@ -33,7 +33,7 @@ export class BotManagementController {
       distributeDto.minAmount,
       distributeDto.maxAmount
     );
-    
+
     return {
       success: true,
       message: 'Distribution completed successfully'
@@ -118,6 +118,16 @@ export class BotManagementController {
         message: error.message
       };
     }
+  }
+
+  // Add this endpoint to your controller for testing
+  @Get('wallets/validate')
+  async validateWallets() {
+    const result = await this.walletService.validateWalletIntegrity();
+    return {
+      success: true,
+      data: result
+    };
   }
 
   // New Claim Management Endpoints
@@ -229,13 +239,13 @@ export class BotManagementController {
 
   @Post('config/status')
   async updateStatus(@Body() { status }: { status: 'stopped' | 'running' | 'paused' }) {
-    
+
     if (status === 'running') {
       await this.botEngineService.startBot();
     } else if (status === 'stopped') {
       await this.botEngineService.stopBot();
     }
-    
+
     return {
       success: true,
       message: `Bot status updated to ${status}`,
@@ -301,7 +311,7 @@ export class BotManagementController {
     try {
       const allTimeStats = await this.botEngineService.getRoundStats();
       const claimableSummary = await this.botEngineService.getClaimableRewardsSummary();
-      
+
       return {
         success: true,
         data: {

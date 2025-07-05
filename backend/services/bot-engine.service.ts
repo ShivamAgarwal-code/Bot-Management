@@ -89,7 +89,7 @@ export class BotEngineService {
 
         this.currentRoundId = currentRound.number;
         this.roundStartTime = currentRound.startTime;
-        
+
         // Schedule betting for this round
         await this.scheduleRoundBetting(currentRound);
       }
@@ -97,45 +97,47 @@ export class BotEngineService {
       this.logger.error('❌ Error in round monitoring:', error.message);
     }
   }
-
-  @Interval(10000) // Check for claimable rewards every 10 seconds
   private async startAutoClaimMonitoring(): Promise<void> {
-    const botConfig = await this.configService.getConfig();
-    if (botConfig.status !== 'running') {
-      return;
+    // Clear any existing interval first
+    if (this.claimCheckInterval) {
+      clearInterval(this.claimCheckInterval);
     }
 
-    try {
-      await this.processAutoClaimsForAllWallets();
-    } catch (error) {
-      this.logger.error('❌ Error in auto-claim monitoring:', error.message);
-    }
+    // Start the interval for auto-claim monitoring
+    this.claimCheckInterval = setInterval(async () => {
+      const botConfig = await this.configService.getConfig();
+      if (botConfig.status !== 'running') {
+        return;
+      }
+
+      try {
+        await this.processAutoClaimsForAllWallets();
+      } catch (error) {
+        this.logger.error('❌ Error in auto-claim monitoring:', error.message);
+      }
+    }, 10000); // Check every 10 seconds
+
+    this.logger.log('🔄 Auto-claim monitoring started');
   }
 
   private async processAutoClaimsForAllWallets(): Promise<void> {
     try {
       const wallets = await this.walletService.getWallets();
-      
+
       if (wallets.length === 0) {
         return;
       }
 
       this.logger.debug(`🔍 Checking ${wallets.length} wallets for claimable rewards...`);
 
-      // Process wallets in batches to avoid overwhelming the RPC
-      const batchSize = 3;
-      for (let i = 0; i < wallets.length; i += batchSize) {
-        const batch = wallets.slice(i, i + batchSize);
-        
-        await Promise.all(batch.map(wallet => 
-          this.processAutoClaimForWallet(wallet).catch(error => {
-            this.logger.error(`❌ Auto-claim failed for wallet ${wallet.address}:`, error.message);
-          })
-        ));
-
-        // Small delay between batches
-        if (i + batchSize < wallets.length) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+      // Process wallets sequentially instead of in batches to avoid RPC issues
+      for (const wallet of wallets) {
+        try {
+          await this.processAutoClaimForWallet(wallet);
+          // Small delay between wallets to avoid overwhelming RPC
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (error) {
+          this.logger.error(`❌ Auto-claim failed for wallet ${wallet.address}:`, error.message);
         }
       }
     } catch (error) {
@@ -179,8 +181,8 @@ export class BotEngineService {
   }
 
   private async updateBetHistoryAfterClaims(
-    walletAddress: string, 
-    claimableRounds: ClaimableRound[], 
+    walletAddress: string,
+    claimableRounds: ClaimableRound[],
     claimResults: any[]
   ): Promise<void> {
     try {
@@ -202,7 +204,7 @@ export class BotEngineService {
             betHistory.status = 'won';
             betHistory.payout = claimResult.amount;
             await this.betHistoryRepository.save(betHistory);
-            
+
             this.logger.debug(`📝 Updated bet history for round ${claimableRound.roundId}: claimed ${claimResult.amount.toFixed(6)} SOL`);
           }
         }
@@ -220,8 +222,8 @@ export class BotEngineService {
     claimedRounds?: number;
   }> {
     try {
-      const wallet = await this.walletRepository.findOne({ 
-        where: { id: walletId, isActive: true } 
+      const wallet = await this.walletRepository.findOne({
+        where: { id: walletId, isActive: true }
       });
 
       if (!wallet) {
@@ -284,18 +286,29 @@ export class BotEngineService {
   }> {
     try {
       const wallets = await this.walletService.getWallets();
-      const walletSummaries = [];
+      const walletSummaries: Array<{
+        walletId: number;
+        walletAddress: string;
+        claimableRounds: number;
+        estimatedRewards: number;
+      }> = [];
       let totalClaimableAmount = 0;
       let totalClaimableRounds = 0;
       let totalWalletsWithRewards = 0;
 
       for (const wallet of wallets) {
         try {
+          // Skip wallets without private keys
+          if (!wallet.privateKey) {
+            this.logger.warn(`⚠️ Skipping wallet ${wallet.address} - No private key found`);
+            continue;
+          }
+
           const walletKeypair = await this.walletService.getWalletKeypair(wallet);
           const claimableRounds = await this.web3Service.getClaimableRounds(walletKeypair);
-          
+
           const estimatedRewards = claimableRounds.reduce((sum, round) => sum + round.estimatedReward, 0);
-          
+
           if (claimableRounds.length > 0) {
             totalWalletsWithRewards++;
             totalClaimableAmount += estimatedRewards;
@@ -309,7 +322,8 @@ export class BotEngineService {
             });
           }
         } catch (error) {
-          this.logger.error(`❌ Error checking claimable rewards for wallet ${wallet.address}:`, error);
+          this.logger.error(`❌ Error checking claimable rewards for wallet ${wallet.address}:`, error.message);
+          // Continue with next wallet instead of failing completely
         }
       }
 
@@ -322,6 +336,7 @@ export class BotEngineService {
 
     } catch (error) {
       this.logger.error('❌ Error getting claimable rewards summary:', error);
+      // Return empty summary instead of throwing
       return {
         totalWalletsWithRewards: 0,
         totalClaimableAmount: 0,
@@ -352,7 +367,7 @@ export class BotEngineService {
       const betStartDelay = this.getRandomInRange(botConfig.betTimeFrom, botConfig.betTimeTo) * 1000;
 
       this.logger.log(`⏰ Scheduling bets for round ${roundInfo.number} in ${betStartDelay / 1000} seconds`);
-      
+
       setTimeout(async () => {
         if (botConfig.status === 'running') {
           await this.executeRoundStrategy(roundInfo);

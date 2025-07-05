@@ -14,7 +14,7 @@ export class BotWallet {
   @Column({ default: true })
   isActive: boolean;
 
-  @Column({ nullable: true })
+  @Column({ nullable: false, type: 'text' })
   privateKey: string; // Encrypted
 
   @CreateDateColumn()

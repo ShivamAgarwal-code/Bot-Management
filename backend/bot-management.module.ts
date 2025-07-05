@@ -9,11 +9,13 @@ import { BotEngineService } from './services/bot-engine.service';
 import { Web3Service } from './services/web3.service';
 import { BotManagementController } from './controllers/bot-management.controller';
 import { AdminDashboardModule } from 'src/admin-dashboard/admin-dashboard.module';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([BotWallet, BotConfig, BetHistory]),
-    AdminDashboardModule
+    AdminDashboardModule,
+    ScheduleModule.forRoot()
   ],
   controllers: [BotManagementController],
   providers: [WalletService, BotConfigService, BotEngineService, Web3Service],

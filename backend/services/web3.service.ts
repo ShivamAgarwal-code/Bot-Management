@@ -10,7 +10,7 @@ import {
 import * as anchor from '@project-serum/anchor';
 import { ConfigService } from '@nestjs/config';
 import { BLOCKCHAIN_CONFIG } from '../config/blockchain.config';
-import * as idl from '../../types/sol_predictor.json';
+import * as idl from '../idl/idl.json';
 import { AnchorProvider } from '@project-serum/anchor';
 
 export interface BetResult {
