@@ -70,11 +70,14 @@ export class BotManagementController {
   @Post('wallets/:id/claim')
   async claimWalletRewards(@Param('id') walletId: number) {
     try {
-      const result = await this.walletService.claimWalletRewards(walletId);
+      const result = await this.botEngineService.manualClaimForWallet(walletId);
       return {
-        success: true,
-        message: 'Rewards claimed successfully',
-        data: result
+        success: result.success,
+        message: result.message,
+        data: {
+          totalClaimed: result.totalClaimed,
+          claimedRounds: result.claimedRounds
+        }
       };
     } catch (error) {
       return {
@@ -108,6 +111,93 @@ export class BotManagementController {
       return {
         success: true,
         message: 'Wallet removed successfully'
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  }
+
+  // New Claim Management Endpoints
+  @Get('claims/summary')
+  async getClaimableRewardsSummary() {
+    try {
+      const summary = await this.botEngineService.getClaimableRewardsSummary();
+      return {
+        success: true,
+        data: summary
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  }
+
+  @Post('claims/auto-claim-all')
+  async autoClaimAllWallets() {
+    try {
+      // This will trigger auto-claim for all wallets manually
+      const wallets = await this.walletService.getWallets();
+      let totalClaimed = 0;
+      let successfulWallets = 0;
+      let failedWallets = 0;
+
+      for (const wallet of wallets) {
+        try {
+          const result = await this.botEngineService.manualClaimForWallet(wallet.id);
+          if (result.success && (result.totalClaimed ?? 0) > 0) {
+            totalClaimed += result.totalClaimed ?? 0;
+            successfulWallets++;
+          }
+        } catch (error) {
+          failedWallets++;
+        }
+      }
+
+      return {
+        success: true,
+        message: `Auto-claim completed: ${successfulWallets} wallets claimed successfully, ${failedWallets} failed`,
+        data: {
+          totalClaimed,
+          successfulWallets,
+          failedWallets,
+          totalWallets: wallets.length
+        }
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  }
+
+  @Get('claims/wallet/:id')
+  async getWalletClaimableRounds(@Param('id') walletId: number) {
+    try {
+      const wallet = await this.walletService.getWalletById(walletId);
+      if (!wallet) {
+        return {
+          success: false,
+          message: 'Wallet not found'
+        };
+      }
+
+      const walletKeypair = await this.walletService.getWalletKeypair(wallet);
+      const claimableRounds = await this.web3Service.getClaimableRounds(walletKeypair);
+
+      return {
+        success: true,
+        data: {
+          walletAddress: wallet.address,
+          claimableRounds: claimableRounds.length,
+          estimatedTotalReward: claimableRounds.reduce((sum, round) => sum + round.estimatedReward, 0),
+          rounds: claimableRounds
+        }
       };
     } catch (error) {
       return {
@@ -197,6 +287,43 @@ export class BotManagementController {
       return {
         success: true,
         data: roundInfo
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  }
+
+  @Get('stats')
+  async getStats() {
+    try {
+      const allTimeStats = await this.botEngineService.getRoundStats();
+      const claimableSummary = await this.botEngineService.getClaimableRewardsSummary();
+      
+      return {
+        success: true,
+        data: {
+          betting: allTimeStats,
+          claimable: claimableSummary
+        }
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  }
+
+  @Get('stats/round/:roundId')
+  async getRoundStats(@Param('roundId') roundId: number) {
+    try {
+      const stats = await this.botEngineService.getRoundStats(roundId);
+      return {
+        success: true,
+        data: stats
       };
     } catch (error) {
       return {

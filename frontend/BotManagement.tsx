@@ -37,6 +37,18 @@ interface RoundInfo {
   totalAmount: number;
 }
 
+interface ClaimableSummary {
+  totalWalletsWithRewards: number;
+  totalClaimableAmount: number;
+  totalClaimableRounds: number;
+  walletSummaries: Array<{
+    walletId: number;
+    walletAddress: string;
+    claimableRounds: number;
+    estimatedRewards: number;
+  }>;
+}
+
 interface BotConfig {
   id: number;
   minBet: number;
@@ -67,7 +79,7 @@ interface BetHistory {
   createdAt: string;
 }
 
-const API_BASE_URL = "https://sol-prediction-backend-6e3r.onrender.com/bot-management";
+const API_BASE_URL = "http://localhost:4000/bot-management";
 
 export default function BotManagement() {
   const [config, setConfig] = useState<BotConfig>({
@@ -89,6 +101,12 @@ export default function BotManagement() {
   });
 
   const [wallets, setWallets] = useState<BotWallet[]>([]);
+  const [claimableSummary, setClaimableSummary] = useState<ClaimableSummary>({
+    totalWalletsWithRewards: 0,
+    totalClaimableAmount: 0,
+    totalClaimableRounds: 0,
+    walletSummaries: []
+  });
   const [betHistory, setBetHistory] = useState<BetHistory[]>([]);
   const [currentRound, setCurrentRound] = useState<RoundInfo | null>(null);
   const [livePrice, setLivePrice] = useState(245.8372);
@@ -101,6 +119,26 @@ export default function BotManagement() {
   const [loading, setLoading] = useState(false);
   const [timeLeft, setTimeLeft] = useState(120);
 
+  const [botStatus, setBotStatus] = useState({
+    isRunning: false,
+    status: 'stopped',
+    currentRoundId: 0,
+    activeWallets: 0,
+    totalWalletBalance: 0,
+    recentBets: 0,
+    claimableRewards: {
+      totalWalletsWithRewards: 0,
+      totalClaimableAmount: 0,
+      totalClaimableRounds: 0
+    },
+    config: {
+      walletCountRange: '',
+      betAmountRange: '',
+      betTimeRange: '',
+      epochRange: ''
+    }
+  });
+
   // Timer effect
   useEffect(() => {
     const interval = setInterval(() => {
@@ -109,6 +147,14 @@ export default function BotManagement() {
         return prev - 1;
       });
     }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadClaimableSummary();
+    }, 30000); // Refresh every 30 seconds
 
     return () => clearInterval(interval);
   }, []);
@@ -124,12 +170,21 @@ export default function BotManagement() {
     return () => clearInterval(priceInterval);
   }, []);
 
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadBotStatus();
+    }, 15000); // Refresh every 15 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
   // Load initial data
   useEffect(() => {
     loadConfig();
     loadWallets();
     loadBettingHistory();
     loadCurrentRound();
+    loadClaimableSummary();
   }, []);
 
   const loadConfig = async () => {
@@ -144,6 +199,18 @@ export default function BotManagement() {
     }
   };
 
+  const loadBotStatus = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/status`);
+      if (response.data.success && response.data.data) {
+        setBotStatus(response.data.data);
+      }
+    } catch (error) {
+      console.error("Failed to load bot status:", error);
+      // Don't update state on error to keep default values
+    }
+  };
+
   const loadBettingHistory = async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/betting-history`);
@@ -154,6 +221,57 @@ export default function BotManagement() {
       console.error("Failed to load betting history:", error);
     }
   };
+
+  const loadClaimableSummary = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/claims/summary`);
+      if (response.data.success && response.data.data) {
+        setClaimableSummary(response.data.data);
+      }
+    } catch (error) {
+      console.error("Failed to load claimable summary:", error);
+      // Keep existing state on error
+    }
+  };
+
+  const handleAutoClaimAll = async () => {
+    try {
+      setLoading(true);
+      const response = await axios.post(`${API_BASE_URL}/claims/auto-claim-all`);
+      if (response.data.success) {
+        toast.success(`Auto-claim completed: ${response.data.data.totalClaimed.toFixed(6)} SOL claimed from ${response.data.data.successfulWallets} wallets!`);
+        await loadWallets();
+        await loadClaimableSummary();
+      }
+    } catch (error) {
+      console.error("Failed to auto-claim all:", error);
+      toast.error("Failed to auto-claim rewards");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClaimWalletRewards = async (walletId: number) => {
+    try {
+      setLoading(true);
+      const response = await axios.post(`${API_BASE_URL}/wallets/${walletId}/claim`);
+      if (response.data.success) {
+        if (response.data.data.totalClaimed > 0) {
+          toast.success(`Successfully claimed ${response.data.data.totalClaimed.toFixed(6)} SOL from ${response.data.data.claimedRounds} rounds!`);
+        } else {
+          toast("No claimable rewards found for this wallet");
+        }
+        await loadWallets();
+        await loadClaimableSummary();
+      }
+    } catch (error) {
+      console.error("Failed to claim wallet rewards:", error);
+      toast.error("Failed to claim rewards");
+    } finally {
+      setLoading(false);
+    }
+  };
+
 
   const loadCurrentRound = async () => {
     try {
@@ -254,7 +372,7 @@ export default function BotManagement() {
   const handleSetConfig = async () => {
     try {
       setLoading(true);
-      
+
       const response = await axios.post(`${API_BASE_URL}/config`, {
         betTimeFrom: Number(config.betTimeFrom),
         betTimeTo: Number(config.betTimeTo),
@@ -565,9 +683,9 @@ export default function BotManagement() {
                         <td className="py-2 px-4 text-center">
                           <div className="flex gap-1 justify-center">
                             <button
-                              onClick={() => handleClaimRewards(wallet.id)}
+                              onClick={() => handleClaimWalletRewards(wallet.id)}
                               disabled={loading || wallet.unclaimedRewards <= 0}
-                              className="px-2 py-1 text-xs bg-yellow-500 hover:bg-yellow-600 disabled:bg-gray-500 disabled:cursor-not-allowed rounded text-white font-semibold"
+                              className="px-2 py-1 text-xs bg-yellow-500 hover:bg-yellow-600 disabled:bg-gray-500 disabled:cursor-not-allowed rounded text-white font-semibold transition-all duration-200"
                               title="Claim Rewards"
                             >
                               <BiCoin className="w-3 h-3" />
@@ -604,6 +722,151 @@ export default function BotManagement() {
             </div>
           </div>
         </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex justify-between items-center">
+          <h2 className="text-lg font-xl font-bold">Claimable Rewards</h2>
+          <div className="flex items-center gap-4">
+            <button
+              onClick={loadClaimableSummary}
+              className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1"
+            >
+              <FiRefreshCw className="w-4 h-4" />
+              Refresh
+            </button>
+            {claimableSummary.totalWalletsWithRewards > 0 && (
+              <button
+                onClick={handleAutoClaimAll}
+                disabled={loading}
+                className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full text-sm font-semibold transition-all duration-200"
+              >
+                {loading ? <DotLoader size={16} color="white" /> : `Claim All (${claimableSummary.totalClaimableAmount.toFixed(4)} SOL)`}
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 p-6 rounded-2xl border border-white/30 backdrop-blur-[10px] bg-[#ffffff1a]">
+          {/* Summary Cards */}
+          <div className="glass-card p-4 rounded-xl text-center">
+            <div className="text-2xl font-bold text-green-400">
+              <NumberFlow
+                value={claimableSummary.totalWalletsWithRewards}
+                className="text-green-400"
+              />
+            </div>
+            <div className="text-sm text-gray-300 mt-1">Wallets with Rewards</div>
+          </div>
+
+          <div className="glass-card p-4 rounded-xl text-center">
+            <div className="text-2xl font-bold text-yellow-400">
+              <NumberFlow
+                value={claimableSummary.totalClaimableAmount}
+                format={{
+                  minimumFractionDigits: 4,
+                  maximumFractionDigits: 4
+                }}
+                className="text-yellow-400"
+              />
+            </div>
+            <div className="text-sm text-gray-300 mt-1">Total SOL Claimable</div>
+          </div>
+
+          <div className="glass-card p-4 rounded-xl text-center">
+            <div className="text-2xl font-bold text-blue-400">
+              <NumberFlow
+                value={claimableSummary.totalClaimableRounds}
+                className="text-blue-400"
+              />
+            </div>
+            <div className="text-sm text-gray-300 mt-1">Claimable Rounds</div>
+          </div>
+
+          <div className="glass-card p-4 rounded-xl text-center">
+            <div className="text-2xl font-bold text-purple-400">
+              <NumberFlow
+                value={claimableSummary.totalClaimableRounds > 0 ? (claimableSummary.totalClaimableAmount / claimableSummary.totalClaimableRounds) : 0}
+                format={{
+                  minimumFractionDigits: 4,
+                  maximumFractionDigits: 4
+                }}
+                className="text-purple-400"
+              />
+            </div>
+            <div className="text-sm text-gray-300 mt-1">Avg SOL per Round</div>
+          </div>
+        </div>
+
+        {/* Detailed Claimable Rewards Table */}
+        {claimableSummary.walletSummaries.length > 0 && (
+          <div className="p-6 rounded-2xl border border-white/30 backdrop-blur-[10px] bg-[#ffffff1a]">
+            <h3 className="text-white font-semibold text-lg mb-4">Detailed Claimable Rewards</h3>
+            <div className="rounded-2xl border border-white/30 bg-transparent max-h-[400px] overflow-hidden">
+              <div className="sticky top-0 z-10 bg-transparent backdrop-blur-[10px]">
+                <table className="w-full text-white text-sm table-auto border-separate border-spacing-y-2">
+                  <thead>
+                    <tr className="bg-[#ffffff0c]">
+                      <th className="py-3 px-4 text-left">Wallet</th>
+                      <th className="py-3 px-4 text-center">Address</th>
+                      <th className="py-3 px-4 text-center">Claimable Rounds</th>
+                      <th className="py-3 px-4 text-center">Estimated Rewards</th>
+                      <th className="py-3 px-4 text-center">Action</th>
+                    </tr>
+                  </thead>
+                </table>
+              </div>
+              <div className="overflow-y-auto max-h-[300px]">
+                <table className="w-full text-white text-sm table-auto border-separate border-spacing-y-2">
+                  <tbody>
+                    {claimableSummary.walletSummaries.map((walletSummary, index) => (
+                      <tr key={walletSummary.walletId} className="bg-[#ffffff0c] rounded-md">
+                        <td className="py-3 px-4 text-left">
+                          <div className="flex items-center gap-2">
+                            <Avatar size="small" src={avatarIcon} />
+                            <span>{`Wallet ${index + 1}`}</span>
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className="font-mono text-xs">
+                            {`${walletSummary.walletAddress.slice(0, 6)}...${walletSummary.walletAddress.slice(-4)}`}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className="px-2 py-1 bg-blue-500/20 text-blue-300 rounded-full text-xs font-semibold">
+                            {walletSummary.claimableRounds}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className="font-semibold text-green-400">
+                            {walletSummary.estimatedRewards.toFixed(6)} SOL
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <button
+                            onClick={() => handleClaimWalletRewards(walletSummary.walletId)}
+                            disabled={loading}
+                            className="px-3 py-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 disabled:from-gray-500 disabled:to-gray-600 disabled:cursor-not-allowed rounded-full text-xs font-semibold transition-all duration-200"
+                          >
+                            {loading ? <DotLoader size={12} color="white" /> : "Claim"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* No Claimable Rewards Message */}
+        {claimableSummary.totalWalletsWithRewards === 0 && (
+          <div className="p-6 rounded-2xl border border-white/30 backdrop-blur-[10px] bg-[#ffffff1a] text-center">
+            <div className="text-gray-400 text-lg mb-2">🎉 No pending rewards to claim</div>
+            <div className="text-gray-500 text-sm">All available rewards have been claimed or no winning bets found.</div>
+          </div>
+        )}
       </section>
 
       {/* BOT SECTION with Live Round Card */}
@@ -828,6 +1091,14 @@ export default function BotManagement() {
                     config.status === 'paused' ? 'Bot Paused' :
                       'Bot Stopped'}
                 </span>
+                {botStatus?.claimableRewards?.totalClaimableAmount > 0 && (
+                  <>
+                    <span className="text-gray-400">•</span>
+                    <span className="text-xs text-yellow-400">
+                      {botStatus.claimableRewards.totalClaimableAmount.toFixed(4)} SOL claimable
+                    </span>
+                  </>
+                )}
               </div>
             </div>
 

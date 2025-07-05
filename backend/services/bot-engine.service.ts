@@ -7,7 +7,7 @@ import { BotConfig } from '../entities/bot-config.entity';
 import { BotWallet } from '../entities/wallet.entity';
 import { WalletService } from './wallet.service';
 import { BotConfigService } from './bot-config.service';
-import { Web3Service, RoundInfo } from './web3.service';
+import { Web3Service, RoundInfo, ClaimableRound } from './web3.service';
 import { BLOCKCHAIN_CONFIG } from '../config/blockchain.config';
 import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import * as crypto from 'crypto';
@@ -21,6 +21,7 @@ export class BotEngineService {
   private currentRoundId = 0;
   private roundCheckInterval: NodeJS.Timeout;
   private betExecutionInterval: NodeJS.Timeout;
+  private claimCheckInterval: NodeJS.Timeout;
   private roundStartTime: number = 0;
 
   constructor(
@@ -50,18 +51,22 @@ export class BotEngineService {
     this.logger.log('🚀 Bot engine started successfully');
     this.logger.log(`📊 Active wallets: ${wallets.length}`);
 
-    // Start monitoring rounds
+    // Start monitoring rounds and auto-claiming
     await this.startRoundMonitoring();
+    await this.startAutoClaimMonitoring();
   }
 
   async stopBot(): Promise<void> {
-
     if (this.roundCheckInterval) {
       clearInterval(this.roundCheckInterval);
     }
 
     if (this.betExecutionInterval) {
       clearInterval(this.betExecutionInterval);
+    }
+
+    if (this.claimCheckInterval) {
+      clearInterval(this.claimCheckInterval);
     }
 
     await this.configService.updateStatus('stopped');
@@ -72,11 +77,8 @@ export class BotEngineService {
   private async startRoundMonitoring(): Promise<void> {
     const botConfig = await this.configService.getConfig();
     if (botConfig.status !== 'running') {
-      this.logger.log('⏸️ Bot is not in running state, skipping round');
-        return;
+      return;
     }
-
-    this.logger.log('🔍 Starting round monitoring...');
 
     try {
       const currentRound = await this.adminDashboardService.getNextRoundInfo();
@@ -93,6 +95,239 @@ export class BotEngineService {
       }
     } catch (error) {
       this.logger.error('❌ Error in round monitoring:', error.message);
+    }
+  }
+
+  @Interval(10000) // Check for claimable rewards every 10 seconds
+  private async startAutoClaimMonitoring(): Promise<void> {
+    const botConfig = await this.configService.getConfig();
+    if (botConfig.status !== 'running') {
+      return;
+    }
+
+    try {
+      await this.processAutoClaimsForAllWallets();
+    } catch (error) {
+      this.logger.error('❌ Error in auto-claim monitoring:', error.message);
+    }
+  }
+
+  private async processAutoClaimsForAllWallets(): Promise<void> {
+    try {
+      const wallets = await this.walletService.getWallets();
+      
+      if (wallets.length === 0) {
+        return;
+      }
+
+      this.logger.debug(`🔍 Checking ${wallets.length} wallets for claimable rewards...`);
+
+      // Process wallets in batches to avoid overwhelming the RPC
+      const batchSize = 3;
+      for (let i = 0; i < wallets.length; i += batchSize) {
+        const batch = wallets.slice(i, i + batchSize);
+        
+        await Promise.all(batch.map(wallet => 
+          this.processAutoClaimForWallet(wallet).catch(error => {
+            this.logger.error(`❌ Auto-claim failed for wallet ${wallet.address}:`, error.message);
+          })
+        ));
+
+        // Small delay between batches
+        if (i + batchSize < wallets.length) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    } catch (error) {
+      this.logger.error('❌ Error processing auto-claims for all wallets:', error);
+    }
+  }
+
+  private async processAutoClaimForWallet(wallet: BotWallet): Promise<void> {
+    try {
+      const walletKeypair = await this.walletService.getWalletKeypair(wallet);
+      const claimableRounds = await this.web3Service.getClaimableRounds(walletKeypair);
+
+      if (claimableRounds.length === 0) {
+        return; // No claimable rounds for this wallet
+      }
+
+      this.logger.log(`💰 Found ${claimableRounds.length} claimable rounds for wallet ${wallet.address.slice(0, 8)}...`);
+
+      // Claim all available rewards for this wallet
+      const claimResults = await this.web3Service.claimAllAvailableRewards(walletKeypair);
+
+      if (claimResults.successfulClaims > 0) {
+        this.logger.log(`✅ Auto-claimed ${claimResults.totalClaimed.toFixed(6)} SOL from ${claimResults.successfulClaims} rounds for wallet ${wallet.address.slice(0, 8)}...`);
+
+        // Update wallet balance in database
+        const newBalance = await this.web3Service.getWalletBalance(wallet.address);
+        wallet.balance = newBalance;
+        await this.walletRepository.save(wallet);
+
+        // Update bet history records to reflect claims
+        await this.updateBetHistoryAfterClaims(wallet.address, claimableRounds, claimResults.results);
+      }
+
+      if (claimResults.failedClaims > 0) {
+        this.logger.warn(`⚠️ Failed to claim from ${claimResults.failedClaims} rounds for wallet ${wallet.address.slice(0, 8)}...`);
+      }
+
+    } catch (error) {
+      this.logger.error(`❌ Error in auto-claim for wallet ${wallet.address}:`, error);
+    }
+  }
+
+  private async updateBetHistoryAfterClaims(
+    walletAddress: string, 
+    claimableRounds: ClaimableRound[], 
+    claimResults: any[]
+  ): Promise<void> {
+    try {
+      for (let i = 0; i < claimableRounds.length && i < claimResults.length; i++) {
+        const claimableRound = claimableRounds[i];
+        const claimResult = claimResults[i];
+
+        if (claimResult.success && claimResult.amount) {
+          // Find and update the corresponding bet history record
+          const betHistory = await this.betHistoryRepository.findOne({
+            where: {
+              walletAddress: walletAddress,
+              epoch: claimableRound.roundId,
+              direction: claimableRound.direction
+            }
+          });
+
+          if (betHistory) {
+            betHistory.status = 'won';
+            betHistory.payout = claimResult.amount;
+            await this.betHistoryRepository.save(betHistory);
+            
+            this.logger.debug(`📝 Updated bet history for round ${claimableRound.roundId}: claimed ${claimResult.amount.toFixed(6)} SOL`);
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error('❌ Error updating bet history after claims:', error);
+    }
+  }
+
+  // Manual claim method for individual wallets
+  async manualClaimForWallet(walletId: number): Promise<{
+    success: boolean;
+    message: string;
+    totalClaimed?: number;
+    claimedRounds?: number;
+  }> {
+    try {
+      const wallet = await this.walletRepository.findOne({ 
+        where: { id: walletId, isActive: true } 
+      });
+
+      if (!wallet) {
+        return { success: false, message: 'Wallet not found' };
+      }
+
+      const walletKeypair = await this.walletService.getWalletKeypair(wallet);
+      const claimableRounds = await this.web3Service.getClaimableRounds(walletKeypair);
+
+      if (claimableRounds.length === 0) {
+        return { success: true, message: 'No claimable rewards found', totalClaimed: 0, claimedRounds: 0 };
+      }
+
+      this.logger.log(`🎯 Manual claim initiated for wallet ${wallet.address.slice(0, 8)}... (${claimableRounds.length} rounds)`);
+
+      const claimResults = await this.web3Service.claimAllAvailableRewards(walletKeypair);
+
+      if (claimResults.successfulClaims > 0) {
+        // Update wallet balance
+        const newBalance = await this.web3Service.getWalletBalance(wallet.address);
+        wallet.balance = newBalance;
+        await this.walletRepository.save(wallet);
+
+        // Update bet history
+        await this.updateBetHistoryAfterClaims(wallet.address, claimableRounds, claimResults.results);
+
+        return {
+          success: true,
+          message: `Successfully claimed ${claimResults.totalClaimed.toFixed(6)} SOL from ${claimResults.successfulClaims} rounds`,
+          totalClaimed: claimResults.totalClaimed,
+          claimedRounds: claimResults.successfulClaims
+        };
+      } else {
+        return {
+          success: false,
+          message: `Failed to claim rewards: ${claimResults.results[0]?.error || 'Unknown error'}`
+        };
+      }
+
+    } catch (error) {
+      this.logger.error('❌ Error in manual claim:', error);
+      return {
+        success: false,
+        message: `Failed to process claim: ${error.message}`
+      };
+    }
+  }
+
+  // Get claimable rewards summary for all wallets
+  async getClaimableRewardsSummary(): Promise<{
+    totalWalletsWithRewards: number;
+    totalClaimableAmount: number;
+    totalClaimableRounds: number;
+    walletSummaries: Array<{
+      walletId: number;
+      walletAddress: string;
+      claimableRounds: number;
+      estimatedRewards: number;
+    }>;
+  }> {
+    try {
+      const wallets = await this.walletService.getWallets();
+      const walletSummaries = [];
+      let totalClaimableAmount = 0;
+      let totalClaimableRounds = 0;
+      let totalWalletsWithRewards = 0;
+
+      for (const wallet of wallets) {
+        try {
+          const walletKeypair = await this.walletService.getWalletKeypair(wallet);
+          const claimableRounds = await this.web3Service.getClaimableRounds(walletKeypair);
+          
+          const estimatedRewards = claimableRounds.reduce((sum, round) => sum + round.estimatedReward, 0);
+          
+          if (claimableRounds.length > 0) {
+            totalWalletsWithRewards++;
+            totalClaimableAmount += estimatedRewards;
+            totalClaimableRounds += claimableRounds.length;
+
+            walletSummaries.push({
+              walletId: wallet.id,
+              walletAddress: wallet.address,
+              claimableRounds: claimableRounds.length,
+              estimatedRewards: estimatedRewards
+            });
+          }
+        } catch (error) {
+          this.logger.error(`❌ Error checking claimable rewards for wallet ${wallet.address}:`, error);
+        }
+      }
+
+      return {
+        totalWalletsWithRewards,
+        totalClaimableAmount,
+        totalClaimableRounds,
+        walletSummaries
+      };
+
+    } catch (error) {
+      this.logger.error('❌ Error getting claimable rewards summary:', error);
+      return {
+        totalWalletsWithRewards: 0,
+        totalClaimableAmount: 0,
+        totalClaimableRounds: 0,
+        walletSummaries: []
+      };
     }
   }
 
@@ -352,6 +587,9 @@ export class BotEngineService {
       take: 10
     });
 
+    // Get claimable rewards summary
+    const claimableSummary = await this.getClaimableRewardsSummary();
+
     return {
       isRunning: config.status === 'running',
       status: config.status,
@@ -359,6 +597,11 @@ export class BotEngineService {
       activeWallets: wallets.length,
       totalWalletBalance: wallets.reduce((sum, w) => sum + Number(w.balance), 0),
       recentBets: recentBets.length,
+      claimableRewards: {
+        totalWalletsWithRewards: claimableSummary.totalWalletsWithRewards,
+        totalClaimableAmount: claimableSummary.totalClaimableAmount,
+        totalClaimableRounds: claimableSummary.totalClaimableRounds
+      },
       config: {
         walletCountRange: `${config.walletCountFrom}-${config.walletCountTo}`,
         betAmountRange: `${config.minBet}-${config.maxBet} SOL`,
@@ -402,6 +645,7 @@ export class BotEngineService {
       pendingBets: bets.filter(bet => bet.status === 'pending').length,
       wonBets: bets.filter(bet => bet.status === 'won').length,
       lostBets: bets.filter(bet => bet.status === 'lost').length,
+      totalPayout: bets.reduce((sum, bet) => sum + Number(bet.payout || 0), 0),
     };
 
     return {
@@ -410,6 +654,8 @@ export class BotEngineService {
       averageBetAmount: stats.totalBets > 0 ? (stats.totalAmount / stats.totalBets).toFixed(6) : 0,
       upBetPercentage: stats.totalBets > 0 ? ((stats.upBets / stats.totalBets) * 100).toFixed(1) : 0,
       downBetPercentage: stats.totalBets > 0 ? ((stats.downBets / stats.totalBets) * 100).toFixed(1) : 0,
+      winRate: stats.totalBets > 0 ? ((stats.wonBets / (stats.wonBets + stats.lostBets)) * 100).toFixed(1) : 0,
+      totalProfit: (stats.totalPayout - stats.totalAmount).toFixed(6)
     };
   }
 }

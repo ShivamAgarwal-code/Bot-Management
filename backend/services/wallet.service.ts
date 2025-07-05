@@ -252,6 +252,18 @@ export class WalletService {
     });
   }
 
+  async getWalletById(walletId: number): Promise<BotWallet | null> {
+  try {
+    return await this.walletRepository.findOne({ 
+      where: { id: walletId, isActive: true },
+      select: ['id', 'address', 'balance', 'isActive', 'privateKey', 'createdAt', 'updatedAt']
+    });
+  } catch (error) {
+    this.logger.error(`Failed to get wallet by ID ${walletId}:`, error);
+    return null;
+  }
+}
+
   async getWalletsWithRewards(): Promise<any[]> {
     const wallets = await this.walletRepository.find({ 
       where: { isActive: true },
